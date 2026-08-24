@@ -1,0 +1,13 @@
+yfinance
+pandas
+requests
+numpy
+joblib
+scikit-learn
+xgboost
+lightgbm
+catboost
+shap
+matplotlib
+openpyxl
+customtkinter
