@@ -1,13 +1,21 @@
-yfinance
+# --- Données ---------------------------------------------------------------
 pandas
-requests
 numpy
-joblib
+requests
+yfinance          # source de repli quand une crypto n'est pas sur Binance
+openpyxl          # lecture / écriture des fichiers Excel
+pyarrow           # cache Parquet : recharge les analyses ~50x plus vite
+
+# --- Modèles ---------------------------------------------------------------
 scikit-learn
 xgboost
 lightgbm
 catboost
-shap
-matplotlib
-openpyxl
+joblib
+
+# --- Interface et graphiques ----------------------------------------------
 customtkinter
+matplotlib
+
+# --- Système ---------------------------------------------------------------
+psutil            # mesure RAM / CPU pour dimensionner l'entraînement

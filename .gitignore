@@ -1,5 +1,16 @@
+# Données et artefacts régénérables
 data_crypto/
 analysis_crypto/
-visualizations/
 prediction_crypto/
 models/
+visualizations/
+
+# Caches
+__pycache__/
+*.py[cod]
+*.parquet
+catboost_info/
+
+# Environnements virtuels
+venv/
+.venv/
