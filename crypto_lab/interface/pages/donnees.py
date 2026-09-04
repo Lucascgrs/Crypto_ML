@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from ... import config, extraction, indicateurs, modele
+from ... import config, exogene, extraction, indicateurs, modele
 from ..textes import AIDES
 from ..theme import COULEURS
 
@@ -63,9 +63,18 @@ class PageDonnees:
         boutons = self._ligne(corps2, espace=(14, 0))
         ctk.CTkButton(boutons, text="⬇️  Télécharger", height=40,
                       command=self._action_telecharger).pack(side="left")
-        ctk.CTkButton(boutons, text="🚀  Tout enchaîner (télécharger → analyser → entraîner → prédire)",
-                      height=40, fg_color=COULEURS["orange"], hover_color="#d68910",
-                      command=self._action_pipeline).pack(side="left", padx=10)
+
+        bouton_exo = ctk.CTkButton(
+            boutons, text="📡 Funding & open interest", height=40,
+            fg_color=COULEURS["bleu"], hover_color="#0097a7",
+            command=self._action_exogene)
+        bouton_exo.pack(side="left", padx=10)
+        self._badge_info(boutons, AIDES["exogene"]).pack(side="left", padx=(0, 10),
+                                                         pady=(10, 0))
+
+        ctk.CTkButton(boutons, text="🚀  Tout enchaîner", height=40,
+                      fg_color=COULEURS["orange"], hover_color="#d68910",
+                      command=self._action_pipeline).pack(side="left")
 
         cadre2, self.tab_apercu = self._creer_tableau(corps2, hauteur=8)
         cadre2.pack(fill="x", pady=(14, 0))
@@ -116,8 +125,39 @@ class PageDonnees:
 
         self.executer(f"Téléchargement {parametres['symbole']}", tache, apres=apres)
 
+    def _action_exogene(self):
+        """
+        Télécharge le funding rate et l'open interest de la paire perpétuelle.
+
+        Ces deux séries sont les seules données du projet qui ne soient pas
+        dérivées du prix. Elles sont FUSIONNÉES avec ce qui a déjà été
+        collecté : c'est ce qui permet à l'open interest, public sur 30 jours
+        seulement, de devenir exploitable au fil des mises à jour.
+        """
+        parametres = self._parametres_telechargement()
+        if parametres is None:
+            return
+        symbole, intervalle = parametres["symbole"], parametres["intervalle"]
+
+        def apres(df):
+            if df is None or df.empty:
+                self.log(f"⚠️ Aucune donnée exogène pour {symbole} — la paire n'a "
+                         f"peut-être pas de contrat perpétuel sur Binance.")
+                return
+            couverture = exogene.couverture(df)
+            detail = " · ".join(f"{nom} {part:.0%}" for nom, part in couverture.items())
+            self.log(f"📡 {symbole} — {len(df):,} lignes exogènes ({detail}). "
+                     f"Relance l'Analyse pour que les colonnes soient prises en compte.")
+
+        self.executer(
+            f"Données exogènes {symbole} ({intervalle})",
+            lambda: exogene.mettre_a_jour(symbole, intervalle,
+                                          debut=parametres["debut"],
+                                          fin=parametres["fin"]),
+            apres=apres)
+
     def _action_pipeline(self):
-        """Enchaîne les quatre étapes du projet pour une crypto donnée."""
+        """Enchaîne les cinq étapes du projet pour une crypto donnée."""
         parametres = self._parametres_telechargement()
         if parametres is None:
             return
@@ -128,6 +168,15 @@ class PageDonnees:
             df = extraction.telecharger(symbole, parametres["debut"], parametres["fin"],
                                         intervalle, parametres["source"])
             extraction.sauvegarder(df, symbole, intervalle)
+
+            # Les données exogènes sont un bonus : leur absence (paire sans
+            # contrat perpétuel, réseau indisponible) ne doit pas casser la chaîne.
+            try:
+                exogene.mettre_a_jour(symbole, intervalle,
+                                      debut=parametres["debut"], fin=parametres["fin"])
+            except Exception as err:                   # noqa: BLE001
+                print(f"⚠️ Données exogènes ignorées : {err}")
+
             indicateurs.analyser_fichier(symbole, intervalle)
             modele.entrainer(symbole, intervalle, horizon, config.MODELE_DEFAUT)
             modele.predire(symbole, intervalle, horizon, config.SEUIL_DEFAUT)

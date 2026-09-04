@@ -18,6 +18,7 @@ Deux optimisations importantes par rapport à l'ancienne version :
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -64,22 +65,72 @@ def chemin_analyse(symbole: str, intervalle: str) -> str:
     return os.path.join(config.DOSSIER_ANALYSES, f"{symbole}_{intervalle}_analyzed.xlsx")
 
 
-def chemin_prediction(symbole: str, intervalle: str, horizon: int) -> str:
-    """prediction_crypto/BTC_1h_h12_prediction.xlsx"""
-    return os.path.join(config.DOSSIER_PREDICTIONS,
-                        f"{symbole}_{intervalle}_h{int(horizon)}_prediction.xlsx")
+def chemin_exogene(symbole: str, intervalle: str) -> str:
+    """data_crypto/EXO_BTC_1h.xlsx — funding rate et open interest cumulés."""
+    return os.path.join(config.DOSSIER_DONNEES, f"EXO_{symbole}_{intervalle}.xlsx")
 
 
-def chemin_modele(symbole: str, intervalle: str, horizon: int) -> str:
+# Marque les fichiers issus d'un walk-forward, pour les distinguer d'une
+# prédiction classique tout en gardant le même format de nom.
+SUFFIXE_WALKFORWARD = "_wf"
+
+# Objectif historique : ses fichiers gardent le nom court, sans suffixe. Les
+# autres objectifs (direction nette, triple barrière, amplitude) s'ajoutent en
+# suffixe, ce qui permet de les faire coexister pour un même horizon.
+TACHE_SANS_SUFFIXE = "direction"
+
+# Fichier produit par les modèles de régression (quantiles + volatilité +
+# espérance de gain). Traité comme un « objectif » supplémentaire côté nommage.
+SUFFIXE_ESPERANCE = "esperance"
+
+
+def _marque_tache(tache: str | None) -> str:
+    """'_barriere' pour un objectif alternatif, '' pour la direction simple."""
+    if not tache or tache == TACHE_SANS_SUFFIXE:
+        return ""
+    return f"_{tache}"
+
+
+def chemin_prediction(symbole: str, intervalle: str, horizon: int,
+                      walk_forward: bool = False, tache: str | None = None) -> str:
+    """prediction_crypto/BTC_1h_h12_prediction.xlsx (+ suffixes objectif / _wf)"""
+    marque = SUFFIXE_WALKFORWARD if walk_forward else ""
+    return os.path.join(
+        config.DOSSIER_PREDICTIONS,
+        f"{symbole}_{intervalle}_h{int(horizon)}"
+        f"{_marque_tache(tache)}{marque}_prediction.xlsx")
+
+
+def chemin_modele(symbole: str, intervalle: str, horizon: int,
+                  tache: str | None = None) -> str:
     """models/MODELE_BTC_1h_h12.joblib"""
-    return os.path.join(config.DOSSIER_MODELES,
-                        f"MODELE_{symbole}_{intervalle}_h{int(horizon)}.joblib")
+    return os.path.join(
+        config.DOSSIER_MODELES,
+        f"MODELE_{symbole}_{intervalle}_h{int(horizon)}{_marque_tache(tache)}.joblib")
 
 
-def chemin_meta(symbole: str, intervalle: str, horizon: int) -> str:
+def chemin_meta(symbole: str, intervalle: str, horizon: int,
+                tache: str | None = None) -> str:
     """models/META_BTC_1h_h12.json"""
-    return os.path.join(config.DOSSIER_MODELES,
-                        f"META_{symbole}_{intervalle}_h{int(horizon)}.json")
+    return os.path.join(
+        config.DOSSIER_MODELES,
+        f"META_{symbole}_{intervalle}_h{int(horizon)}{_marque_tache(tache)}.json")
+
+
+def chemin_regression(symbole: str, intervalle: str, horizon: int,
+                      cible: str) -> str:
+    """models/REGRESSION_BTC_1h_h12_volatilite.joblib"""
+    return os.path.join(
+        config.DOSSIER_MODELES,
+        f"REGRESSION_{symbole}_{intervalle}_h{int(horizon)}_{cible}.joblib")
+
+
+def chemin_meta_regression(symbole: str, intervalle: str, horizon: int,
+                           cible: str) -> str:
+    """models/METAREG_BTC_1h_h12_volatilite.json"""
+    return os.path.join(
+        config.DOSSIER_MODELES,
+        f"METAREG_{symbole}_{intervalle}_h{int(horizon)}_{cible}.json")
 
 
 def _chemin_parquet(chemin_xlsx: str) -> str:
@@ -159,7 +210,7 @@ def _lister(dossier: str, suffixe: str) -> list[str]:
         return []
     fin = suffixe + ".xlsx"
     cles = [f[: -len(fin)] for f in os.listdir(dossier)
-            if f.endswith(fin) and not f.startswith(("~$", "TOP_"))]
+            if f.endswith(fin) and not f.startswith(("~$", "TOP_", "EXO_"))]
     return sorted(cles)
 
 
@@ -192,6 +243,16 @@ def lister_modeles() -> list[str]:
     return sorted(cles)
 
 
+def lister_regressions() -> list[str]:
+    """['BTC_1h_h12_volatilite', ...] — modèles de régression entraînés."""
+    if not os.path.isdir(config.DOSSIER_MODELES):
+        return []
+    cles = [f[len("REGRESSION_"): -len(".joblib")]
+            for f in os.listdir(config.DOSSIER_MODELES)
+            if f.startswith("REGRESSION_") and f.endswith(".joblib")]
+    return sorted(cles)
+
+
 def separer_cle(cle: str) -> tuple[str, str]:
     """'BTC_1h' -> ('BTC', '1h'). Tolère les symboles contenant un underscore."""
     if "_" not in cle:
@@ -200,12 +261,65 @@ def separer_cle(cle: str) -> tuple[str, str]:
     return symbole, intervalle
 
 
-def separer_cle_modele(cle: str) -> tuple[str, str, int]:
-    """'BTC_1h_h12' -> ('BTC', '1h', 12)."""
+def est_walkforward(cle: str) -> bool:
+    """Vrai si la clé désigne un fichier produit par un walk-forward."""
+    return cle.endswith(SUFFIXE_WALKFORWARD)
+
+
+@dataclass(frozen=True)
+class CleModele:
+    """Tout ce qu'un nom de fichier de modèle ou de prédiction encode."""
+
+    symbole: str
+    intervalle: str
+    horizon: int
+    tache: str = TACHE_SANS_SUFFIXE
+    walk_forward: bool = False
+
+    @property
+    def esperance(self) -> bool:
+        """Vrai pour un fichier de régression (quantiles + espérance de gain)."""
+        return self.tache == SUFFIXE_ESPERANCE
+
+
+# Suffixes d'objectif reconnus dans les noms de fichiers. Constitué
+# dynamiquement pour qu'un nouvel objectif dans `cibles.TACHES` soit lu sans
+# rien toucher ici — l'import est tardif afin d'éviter une boucle d'imports.
+def _suffixes_connus() -> tuple[str, ...]:
+    from . import cibles
+    return tuple(cibles.TACHES) + (SUFFIXE_ESPERANCE,)
+
+
+def analyser_cle(cle: str) -> CleModele:
+    """
+    'BTC_1h_h12', 'BTC_1h_h3_barriere_wf', 'BTC_1h_h6_esperance' -> CleModele.
+
+    Tolère les symboles contenant un underscore et les clés incomplètes : à
+    défaut d'horizon lisible, celui par défaut est retenu.
+    """
+    walk_forward = cle.endswith(SUFFIXE_WALKFORWARD)
+    if walk_forward:
+        cle = cle[: -len(SUFFIXE_WALKFORWARD)]
+
+    tache = TACHE_SANS_SUFFIXE
+    for suffixe in _suffixes_connus():
+        if cle.endswith("_" + suffixe):
+            tache = suffixe
+            cle = cle[: -len(suffixe) - 1]
+            break
+
+    horizon = config.HORIZON_DEFAUT
     if "_h" in cle:
-        base, horizon = cle.rsplit("_h", 1)
-        if horizon.isdigit():
-            symbole, intervalle = separer_cle(base)
-            return symbole, intervalle, int(horizon)
+        base, valeur = cle.rsplit("_h", 1)
+        if valeur.isdigit():
+            cle, horizon = base, int(valeur)
+
     symbole, intervalle = separer_cle(cle)
-    return symbole, intervalle, config.HORIZON_DEFAUT
+    return CleModele(symbole=symbole, intervalle=intervalle, horizon=horizon,
+                     tache=tache, walk_forward=walk_forward)
+
+
+def separer_cle_modele(cle: str) -> tuple[str, str, int]:
+    """Raccourci historique : (symbole, intervalle, horizon) seulement."""
+    infos = analyser_cle(cle)
+    return infos.symbole, infos.intervalle, infos.horizon

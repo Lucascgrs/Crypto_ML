@@ -15,9 +15,10 @@ from . import console
 
 console.securiser()   # emojis/accents lisibles même dans un terminal Windows
 
-from . import backtest, config, extraction, indicateurs, modele, ressources, stockage  # noqa: E402
+from . import (amplitude, backtest, cibles, config, exogene,  # noqa: E402
+               extraction, indicateurs, modele, ressources, stockage)
 
-__all__ = ["backtest", "config", "console", "extraction", "indicateurs",
-           "modele", "ressources", "stockage"]
+__all__ = ["amplitude", "backtest", "cibles", "config", "console", "exogene",
+           "extraction", "indicateurs", "modele", "ressources", "stockage"]
 
-__version__ = "2.0"
+__version__ = "2.1"

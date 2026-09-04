@@ -4,15 +4,17 @@ Téléchargement des données de marché, en ligne de commande.
     python GatherData.py BTC ETH --intervalle 1h --debut 2022-01-01
     python GatherData.py --top 5 --intervalle 4h
     python GatherData.py BTC --source Yahoo --intervalle 1d
+    python GatherData.py BTC --exogene            # funding rate + open interest
 
-Le code est dans `crypto_lab/extraction.py` ; ce fichier n'est que l'entrée
-en ligne de commande. Depuis l'interface : onglet « 1 · Extraction ».
+Le code est dans `crypto_lab/extraction.py` et `crypto_lab/exogene.py` ; ce
+fichier n'est que l'entrée en ligne de commande. Depuis l'interface : onglet
+« 1 · Extraction ».
 """
 
 import argparse
 import sys
 
-from crypto_lab import config, extraction
+from crypto_lab import config, exogene, extraction
 
 
 def analyser_arguments():
@@ -28,6 +30,11 @@ def analyser_arguments():
     parseur.add_argument("--fin", default="2026-01-01", help="Date de fin (AAAA-MM-JJ).")
     parseur.add_argument("--source", default="Binance", choices=["Binance", "Yahoo"],
                          help="Source des données (défaut : Binance).")
+    parseur.add_argument("--exogene", action="store_true",
+                         help="Télécharger aussi le funding rate et l'open interest "
+                              "(Binance Futures). Fusionné avec l'historique déjà "
+                              "collecté : l'open interest, public sur 30 jours "
+                              "seulement, s'accumule au fil des mises à jour.")
     return parseur.parse_args()
 
 
@@ -48,6 +55,15 @@ def main():
         df = extraction.telecharger(symbole.upper(), arguments.debut, arguments.fin,
                                     arguments.intervalle, arguments.source)
         extraction.sauvegarder(df, symbole.upper(), arguments.intervalle)
+
+        if arguments.exogene:
+            # Bonus : leur absence (paire sans perpétuel, réseau coupé) ne doit
+            # pas faire échouer le téléchargement principal.
+            try:
+                exogene.mettre_a_jour(symbole.upper(), arguments.intervalle,
+                                      debut=arguments.debut, fin=arguments.fin)
+            except Exception as err:                   # noqa: BLE001
+                print(f"⚠️ Données exogènes ignorées pour {symbole} : {err}")
     return 0
 
 

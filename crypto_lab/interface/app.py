@@ -1,7 +1,7 @@
 """
 Fenêtre principale de Crypto Lab.
 
-Assemble les six pages (une par étape du pipeline), la console, la barre de
+Assemble les sept pages (une par étape du pipeline), la console, la barre de
 statut et le moteur d'exécution en arrière-plan.
 
 Règle de fonctionnement : tout traitement long part dans un thread de travail
@@ -21,8 +21,8 @@ import customtkinter as ctk
 from .. import config
 from . import theme
 from .composants import FluxConsole, MixinComposants
-from .pages import (PageAnalyse, PageBacktest, PageDonnees, PageEvaluation,
-                    PageModele, PageVisualisation)
+from .pages import (PageAmplitude, PageAnalyse, PageBacktest, PageDonnees,
+                    PageEvaluation, PageModele, PageVisualisation)
 from .theme import COULEURS
 
 # Navigation : (clé interne, libellé affiché)
@@ -30,14 +30,15 @@ NAVIGATION = [
     ("Données",       "📥  1 · Extraction"),
     ("Analyse",       "🔬  2 · Analyse"),
     ("Modèle",        "🧠  3 · Prédiction"),
-    ("Évaluation",    "📋  4 · Évaluation"),
-    ("Visualisation", "📊  5 · Visualisation"),
-    ("Backtest",      "💰  6 · Backtest"),
+    ("Amplitude",     "📐  4 · Amplitude"),
+    ("Évaluation",    "📋  5 · Évaluation"),
+    ("Visualisation", "📊  6 · Visualisation"),
+    ("Backtest",      "💰  7 · Backtest"),
 ]
 
 
 class CryptoLab(ctk.CTk, MixinComposants, PageDonnees, PageAnalyse, PageModele,
-                PageEvaluation, PageVisualisation, PageBacktest):
+                PageAmplitude, PageEvaluation, PageVisualisation, PageBacktest):
     """Application complète : extraction → analyse → modèle → backtest."""
 
     def __init__(self):
@@ -67,10 +68,11 @@ class CryptoLab(ctk.CTk, MixinComposants, PageDonnees, PageAnalyse, PageModele,
         self._construire_console()
         self._construire_barre_statut()
 
-        # Construction des six pages, dans l'ordre du pipeline.
+        # Construction des sept pages, dans l'ordre du pipeline.
         self._page_donnees()
         self._page_analyse()
         self._page_modele()
+        self._page_amplitude()
         self._page_evaluation()
         self._page_visualisation()
         self._page_backtest()

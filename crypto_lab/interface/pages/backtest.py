@@ -77,6 +77,16 @@ class PageBacktest:
         self._badge_info(rangee2, AIDES["bt_short"]).pack(side="left", padx=(0, 16),
                                                           pady=(18, 0))
 
+        self.bt_retenu = ctk.CTkCheckBox(rangee2, text="Respecter « Retenu »")
+        self.bt_retenu.pack(side="left", padx=(0, 6), pady=(18, 0))
+        self._badge_info(rangee2, AIDES["bt_retenu"]).pack(side="left", padx=(0, 16),
+                                                           pady=(18, 0))
+
+        colonne_sizing, self.bt_sizing, _ = self._menu(
+            rangee2, "Taille de position", ["fixe", "proportionnel"], 150,
+            aide=AIDES["bt_sizing"])
+        colonne_sizing.pack(side="left", padx=(0, 16))
+
         ctk.CTkButton(rangee2, text="▶️ Simuler", height=40, width=140,
                       command=self._action_simuler).pack(side="left", pady=(14, 0))
 
@@ -93,6 +103,13 @@ class PageBacktest:
                        sticky="ew", padx=5, pady=5)
             self.bt_cartes[nom] = valeur
 
+        # Bandeau d'avertissement : visible seulement quand la simulation
+        # déborde sur les données d'entraînement.
+        self.bt_avertissement = ctk.CTkLabel(
+            page, text="", font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=COULEURS["rouge"], wraplength=1000, justify="left", anchor="w")
+        self.bt_avertissement.pack(fill="x", pady=(0, 6))
+
         zone = self._zone_graphe(page, "backtest", hauteur=780)
         zone.pack(fill="x", pady=(0, 10))
         zone.pack_propagate(False)
@@ -106,7 +123,8 @@ class PageBacktest:
         if cle in ("(aucun)", ""):
             self.log("❌ Aucune prédiction disponible. Lance d'abord « Prédire ».")
             return
-        symbole, intervalle, horizon = stockage.separer_cle_modele(cle)
+        infos = stockage.analyser_cle(cle)
+        symbole, intervalle, horizon = infos.symbole, infos.intervalle, infos.horizon
 
         debut = self.bt_debut.get().strip() or None
         fin = self.bt_fin.get().strip() or None
@@ -124,12 +142,15 @@ class PageBacktest:
             frais=self._lire_float(self.bt_frais, 0.1) / 100,
             slippage=self._lire_float(self.bt_slippage, 0.05) / 100,
             ventes_a_decouvert=self.bt_short.get() == 1,
+            sizing=self.bt_sizing.get(),
+            respecter_retenu=self.bt_retenu.get() == 1,
         )
         bloc = "test" if self.bt_test_seul.get() == 1 else None
 
         def tache():
-            df = stockage.lire_tableau(
-                stockage.chemin_prediction(symbole, intervalle, horizon))
+            df = stockage.lire_tableau(stockage.chemin_prediction(
+                symbole, intervalle, horizon,
+                walk_forward=infos.walk_forward, tache=infos.tache))
             if df is None or df.empty:
                 raise FileNotFoundError("Fichier de prédiction introuvable.")
             return backtest.simuler_fichier(df, parametres, debut, fin, bloc)
@@ -139,12 +160,36 @@ class PageBacktest:
 
     # ----------------------------------------------------------------------
     def _afficher_resultats(self, resultat):
+        self._avertir_donnees_apprises(resultat)
         self._remplir_cartes(resultat)
         self._tracer_courbes(resultat)
+        mise = (f" · mise moyenne {resultat['mise_moyenne']:.0f}%"
+                if resultat.get("sizing") == "proportionnel" else "")
         self.log(f"💰 {resultat['nb_trades']} trades · "
                  f"rendement {resultat['rendement_total']:+.1f}% · "
                  f"Buy & Hold {resultat['rendement_bh']:+.1f}% · "
-                 f"drawdown {resultat['max_drawdown']:.1f}%")
+                 f"drawdown {resultat['max_drawdown']:.1f}%{mise}")
+
+    def _avertir_donnees_apprises(self, resultat):
+        """
+        Prévient quand la simulation couvre des données d'entraînement.
+
+        Sur ces périodes le modèle rejoue ce qu'il a mémorisé : le rendement
+        explose et ne dit rien de sa valeur réelle. Le message reste affiché
+        tant que le cas se présente, pour qu'on ne lise pas le chiffre de
+        travers.
+        """
+        part = resultat.get("part_apprise", 0.0)
+        if part <= 0:
+            self.bt_avertissement.configure(text="")
+            return
+        self.bt_avertissement.configure(
+            text=(f"⚠️  {part:.0%} de la période simulée a servi à entraîner le modèle "
+                  f"(zones rouge et orange sur les graphes). Sur ces périodes il rejoue "
+                  f"ce qu'il a mémorisé : le rendement affiché est illusoire.\n"
+                  f"Pour un résultat honnête sur tout l'historique, lance un "
+                  f"« 📏 Walk-forward » depuis l'onglet Prédiction et simule le fichier "
+                  f"« …_wf » qu'il produit."))
 
     def _remplir_cartes(self, resultat):
         cartes = self.bt_cartes
@@ -179,9 +224,33 @@ class PageBacktest:
                                     text_color=teinte(resultat["sortino"], 1.5))
         cartes["Calmar"].configure(text=f"{resultat['calmar']:.2f}",
                                    text_color=teinte(resultat["calmar"]))
+        # En mode proportionnel, la mise moyenne est la lecture qui manque :
+        # un rendement plus faible avec 35 % de mise n'est pas un moins bon
+        # résultat, c'est un risque trois fois moindre.
+        mise = (f"  ·  mise {resultat['mise_moyenne']:.0f}%"
+                if resultat.get("sizing") == "proportionnel" else "")
         cartes["Long / Short"].configure(
-            text=f"{resultat['nb_longs']:,} / {resultat['nb_shorts']:,}",
-            font=ctk.CTkFont(size=18, weight="bold"))
+            text=f"{resultat['nb_longs']:,} / {resultat['nb_shorts']:,}{mise}",
+            font=ctk.CTkFont(size=16, weight="bold"))
+
+    # Zones colorées derrière les courbes : ce que le modèle a vu, et ce qu'il
+    # n'a pas vu. Sans ce repère, un backtest lancé sur tout l'historique donne
+    # un résultat magnifique qu'on peut prendre pour une performance réelle.
+    TEINTES_BLOCS = {
+        "train":      ("#e74c3c", 0.10, "Apprentissage — résultat non représentatif"),
+        "validation": ("#f39c12", 0.10, "Validation — a servi au réglage"),
+        "test":       ("#2ecc71", 0.07, "Jamais vu par le modèle"),
+    }
+
+    def _ombrer_blocs(self, axe, blocs, avec_legende=False):
+        """Grise les périodes d'apprentissage et de validation sur un axe."""
+        for nom, (debut, fin) in sorted(blocs.items(), key=lambda item: item[1][0]):
+            teinte = self.TEINTES_BLOCS.get(nom)
+            if teinte is None:
+                continue
+            couleur, opacite, libelle = teinte
+            axe.axvspan(debut, fin, color=couleur, alpha=opacite, zorder=0,
+                        label=libelle if avec_legende else None)
 
     def _tracer_courbes(self, resultat):
         """Deux graphes synchronisés : prix et trades en haut, capital en bas."""
@@ -190,6 +259,10 @@ class PageBacktest:
         axe_capital = figure.add_subplot(212, sharex=axe_prix)
         theme.styliser_axes(axe_prix)
         theme.styliser_axes(axe_capital)
+
+        blocs = resultat.get("blocs") or {}
+        self._ombrer_blocs(axe_prix, blocs, avec_legende=True)
+        self._ombrer_blocs(axe_capital, blocs)
 
         prix = resultat["prix"]
         axe_prix.plot(prix.index, prix.values, color=COULEURS["accent_clair"], lw=0.9,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import customtkinter as ctk
 import numpy as np
 
-from ... import modele, stockage
+from ... import cibles, config, modele, stockage
 from .. import theme
 from ..theme import COULEURS
 
@@ -53,15 +53,18 @@ class PageVisualisation:
 
     # ----------------------------------------------------------------------
     def _selection_viz(self):
-        """(symbole, intervalle, horizon) de la prédiction sélectionnée."""
+        """Décomposition du fichier de prédiction choisi, ou None."""
         cle = self.viz_fichier.get()
         if cle in ("(aucun)", ""):
             self.log("❌ Aucune prédiction. Lance d'abord « Prédire ».")
             return None
-        return stockage.separer_cle_modele(cle)
+        return stockage.analyser_cle(cle)
 
-    def _charger_prediction(self, symbole, intervalle, horizon):
-        df = stockage.lire_tableau(stockage.chemin_prediction(symbole, intervalle, horizon))
+    @staticmethod
+    def _charger_prediction(infos):
+        df = stockage.lire_tableau(stockage.chemin_prediction(
+            infos.symbole, infos.intervalle, infos.horizon,
+            walk_forward=infos.walk_forward, tache=infos.tache))
         if df is None or df.empty:
             raise FileNotFoundError("Fichier de prédiction introuvable.")
         return df
@@ -70,10 +73,10 @@ class PageVisualisation:
     # 1. Prix et justesse des signaux
     # ----------------------------------------------------------------------
     def _graphe_signaux(self):
-        selection = self._selection_viz()
-        if selection is None:
+        infos = self._selection_viz()
+        if infos is None:
             return
-        symbole, intervalle, horizon = selection
+        symbole, intervalle, horizon = infos.symbole, infos.intervalle, infos.horizon
         seuil = self.lire_seuil()
 
         def apres(df):
@@ -109,31 +112,35 @@ class PageVisualisation:
             self._afficher_figure("viz", figure)
 
         self.executer(f"Graphique {symbole}",
-                      lambda: self._charger_prediction(symbole, intervalle, horizon),
-                      apres=apres)
+                      lambda: self._charger_prediction(infos), apres=apres)
 
     # ----------------------------------------------------------------------
     # 2. Importance des indicateurs
     # ----------------------------------------------------------------------
     def _graphe_importance(self):
-        selection = self._selection_viz()
-        if selection is None:
+        infos = self._selection_viz()
+        if infos is None:
             return
-        symbole, intervalle, horizon = selection
+        symbole, intervalle, horizon = infos.symbole, infos.intervalle, infos.horizon
 
         def apres(importance):
-            figure = self._nouvelle_figure((10, 5))
+            figure = self._nouvelle_figure((10, 5.5))
             axe = figure.add_subplot(111)
             theme.styliser_axes(axe)
 
             valeurs = importance.sort_values()
-            couleurs = [COULEURS["vert"] if v > 0 else COULEURS["rouge"]
-                        for v in valeurs.values]
-            axe.barh(valeurs.index, valeurs.values, color=couleurs)
+            # Les colonnes de contexte (multi-timeframe, exogènes) sont teintées
+            # à part : c'est le seul graphique qui dise si elles servent
+            # vraiment à quelque chose ou si elles ne font que diluer le signal.
+            couleurs = [COULEURS["bleu"] if self._est_contexte(nom)
+                        else (COULEURS["vert"] if valeur > 0 else COULEURS["rouge"])
+                        for nom, valeur in valeurs.items()]
+            axe.barh(list(valeurs.index), valeurs.values, color=couleurs)
             axe.axvline(0, color="#777777", lw=0.8)
-            axe.set_title(f"{symbole} ({intervalle}) — perte d'AUC quand l'indicateur "
-                          f"est mélangé (horizon {horizon})")
-            axe.set_xlabel("Perte d'AUC (plus c'est grand, plus l'indicateur compte)")
+            axe.set_title(f"{symbole} ({intervalle}) — perte d'AUC quand la feature "
+                          f"est mélangée (horizon {horizon})\n"
+                          f"en bleu : contexte multi-timeframe et données exogènes")
+            axe.set_xlabel("Perte d'AUC (plus c'est grand, plus la feature compte)")
             figure.tight_layout()
             self._afficher_figure("viz", figure)
 
@@ -143,8 +150,14 @@ class PageVisualisation:
 
         self.executer(
             f"Importance {symbole}",
-            lambda: modele.importance_indicateurs(symbole, intervalle, horizon),
+            lambda: modele.importance_indicateurs(symbole, intervalle, horizon,
+                                                  tache=infos.tache),
             apres=apres)
+
+    @staticmethod
+    def _est_contexte(nom: str) -> bool:
+        """Vrai pour une feature ajoutée par le contexte (et non un des 8 de base)."""
+        return str(nom) in config.COLONNES_CONTEXTE
 
     # ----------------------------------------------------------------------
     # 3. Fiabilité de la confiance annoncée
@@ -156,13 +169,14 @@ class PageVisualisation:
         Une courbe proche de la diagonale signifie que « 60 % de confiance »
         correspond bien à 60 % de réussite : le seuil est alors interprétable.
         """
-        selection = self._selection_viz()
-        if selection is None:
+        infos = self._selection_viz()
+        if infos is None:
             return
-        symbole, intervalle, horizon = selection
+        symbole, intervalle = infos.symbole, infos.intervalle
+        objectif = cibles.obtenir(infos.tache)
 
         def calculer():
-            df = self._charger_prediction(symbole, intervalle, horizon)
+            df = self._charger_prediction(infos)
             test = df[(df["Bloc"] == "test") & df["Correct"].notna()]
             base = test if len(test) > 200 else df.dropna(subset=["Correct"])
             if base.empty:
@@ -187,11 +201,16 @@ class PageVisualisation:
             axe = figure.add_subplot(111)
             theme.styliser_axes(axe)
 
-            axe.plot([0.5, 1.0], [0.5, 1.0], ls="--", color=COULEURS["texte_doux"],
-                     lw=1.0, label="Confiance parfaitement honnête")
+            # Le hasard ne vaut 50 % qu'en binaire : avec cinq classes
+            # d'amplitude, c'est 20 %, et la diagonale part de là.
+            hasard = objectif.confiance_neutre
+            axe.plot([hasard, 1.0], [hasard, 1.0], ls="--",
+                     color=COULEURS["texte_doux"], lw=1.0,
+                     label="Confiance parfaitement honnête")
             axe.plot(annonce, observe, "o-", color=COULEURS["accent_clair"], lw=1.8,
                      markersize=7, label="Modèle")
-            axe.axhline(0.5, color=COULEURS["rouge"], ls=":", lw=1.0, label="Hasard")
+            axe.axhline(hasard, color=COULEURS["rouge"], ls=":", lw=1.0,
+                        label=f"Hasard ({hasard:.0%})")
 
             for x, y, n in zip(annonce, observe, effectifs):
                 axe.annotate(f"n={n:,}", (x, y), textcoords="offset points",
@@ -200,7 +219,8 @@ class PageVisualisation:
 
             portee = "bloc test" if sur_test else "tout l'historique"
             axe.set_title(f"{symbole} ({intervalle}) — confiance annoncée vs justesse "
-                          f"observée ({portee}, {total:,} bougies)")
+                          f"observée\n{objectif.libelle} · {portee} · "
+                          f"{total:,} bougies")
             axe.set_xlabel("Confiance annoncée par le modèle")
             axe.set_ylabel("Part de prédictions correctes")
             theme.legende(axe, loc="upper left", fontsize=9)

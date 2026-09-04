@@ -8,6 +8,7 @@ court et autonome par écran, au lieu d'un unique module de plusieurs milliers
 de lignes.
 """
 
+from .amplitude import PageAmplitude
 from .analyse import PageAnalyse
 from .backtest import PageBacktest
 from .donnees import PageDonnees
@@ -15,5 +16,5 @@ from .evaluation import PageEvaluation
 from .modele import PageModele
 from .visualisation import PageVisualisation
 
-__all__ = ["PageAnalyse", "PageBacktest", "PageDonnees", "PageEvaluation",
-           "PageModele", "PageVisualisation"]
+__all__ = ["PageAmplitude", "PageAnalyse", "PageBacktest", "PageDonnees",
+           "PageEvaluation", "PageModele", "PageVisualisation"]

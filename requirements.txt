@@ -1,14 +1,14 @@
 # --- Données ---------------------------------------------------------------
 pandas
 numpy
-requests
+requests          # Binance spot + futures (funding, open interest), CoinGecko
 yfinance          # source de repli quand une crypto n'est pas sur Binance
 openpyxl          # lecture / écriture des fichiers Excel
 pyarrow           # cache Parquet : recharge les analyses ~50x plus vite
 
 # --- Modèles ---------------------------------------------------------------
-scikit-learn
-xgboost
+scikit-learn      # >= 1.0 pour HistGradientBoostingRegressor(loss="quantile")
+xgboost           # >= 2.0 pour l'objectif reg:quantileerror
 lightgbm
 catboost
 joblib

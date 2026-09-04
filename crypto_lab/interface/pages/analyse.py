@@ -29,6 +29,12 @@ class PageAnalyse:
                       command=lambda: self.afficher_page("Analyse")
                       ).pack(side="left", pady=(18, 0))
 
+        self.ana_contexte = ctk.CTkCheckBox(
+            ligne, text="Contexte multi-timeframe et exogène")
+        self.ana_contexte.select()
+        self.ana_contexte.pack(side="left", padx=(0, 6), pady=(18, 0))
+        self._badge_info(ligne, AIDES["contexte"]).pack(side="left", pady=(18, 0))
+
         boutons = self._ligne(corps, espace=(14, 0))
         ctk.CTkButton(boutons, text="🔬 Analyser ce fichier", height=40,
                       command=self._action_analyser).pack(side="left")
@@ -75,6 +81,8 @@ class PageAnalyse:
             return
         symbole, intervalle = stockage.separer_cle(cle)
 
+        contexte = self.ana_contexte.get() == 1
+
         def apres(df):
             if df is None or df.empty:
                 return
@@ -85,13 +93,38 @@ class PageAnalyse:
                 font=ctk.CTkFont(size=14, weight="bold"))
             apercu = df[config.COLONNES_PRIX[3:] + config.INDICATEURS].tail(10)
             self._remplir_tableau(self.tab_analyse, apercu.round(4).reset_index())
+            self._resumer_contexte(df)
 
         self.executer(f"Analyse {symbole} ({intervalle})",
-                      lambda: indicateurs.analyser_fichier(symbole, intervalle),
+                      lambda: indicateurs.analyser_fichier(symbole, intervalle,
+                                                           contexte),
                       apres=apres)
 
+    def _resumer_contexte(self, df):
+        """Dit lesquelles des colonnes optionnelles ont réellement été créées."""
+        presentes = [c for c in config.COLONNES_CONTEXTE if c in df.columns]
+        if not presentes:
+            self.log("ℹ️ Aucune colonne de contexte — ni intervalle supérieur "
+                     "exploitable, ni données exogènes téléchargées.")
+            return
+
+        mtf = [c for c in presentes if c in config.INDICATEURS_MTF]
+        exo = [c for c in presentes if c in config.COLONNES_EXOGENES]
+        manquantes = [c for c in config.COLONNES_EXOGENES if c not in presentes]
+
+        message = f"🔭 Contexte ajouté : {len(mtf)} colonnes multi-timeframe"
+        if exo:
+            message += f", {len(exo)} exogènes ({', '.join(exo)})"
+        if manquantes:
+            message += (f". Écartées faute de couverture suffisante : "
+                        f"{', '.join(manquantes)} — relance le téléchargement "
+                        f"exogène régulièrement pour les accumuler.")
+        self.log(message)
+
     def _action_analyser_tout(self):
-        self.executer("Analyse de tout le dossier", indicateurs.analyser_tout,
+        contexte = self.ana_contexte.get() == 1
+        self.executer("Analyse de tout le dossier",
+                      lambda: indicateurs.analyser_tout(contexte),
                       apres=lambda cles: self.log(
                           f"📦 {len(cles or [])} fichier(s) analysé(s) — "
-                          f"passe à l'onglet Modèle."))
+                          f"passe à l'onglet Prédiction."))

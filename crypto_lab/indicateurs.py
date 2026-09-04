@@ -212,6 +212,61 @@ def calculer_indicateurs(df: pd.DataFrame) -> pd.DataFrame:
     }, index=df.index)
 
 
+def agreger(df: pd.DataFrame, regle: str) -> pd.DataFrame:
+    """
+    Rééchantillonne un OHLCV vers un intervalle plus large.
+
+    Convention identique à celle de Binance : la bougie porte son heure
+    d'OUVERTURE et couvre [T, T + durée). Une bougie 4h étiquetée 00:00 agrège
+    donc les bougies 1h de 00:00 à 03:00.
+    """
+    agrege = df.resample(regle).agg({
+        "Open": "first", "High": "max", "Low": "min",
+        "Close": "last", "Volume": "sum"})
+    return agrege.dropna(subset=["Close"])
+
+
+def calculer_indicateurs_superieurs(df: pd.DataFrame,
+                                    intervalle: str) -> pd.DataFrame | None:
+    """
+    Les 8 mêmes indicateurs, calculés un cran au-dessus (solution multi-timeframe).
+
+    Un modèle en 1h ne voit que l'agitation horaire : il ignore complètement
+    s'il se trouve dans une tendance 4h haussière ou dans un retournement. Ces
+    8 colonnes supplémentaires lui donnent ce contexte — 8, pas 100 : le
+    principe « trop de data tue la data » reste la règle.
+
+    ANTI-FUITE — le point délicat. Une bougie 4h étiquetée 00:00 couvre
+    00:00→04:00 : sa clôture n'est connue qu'à 04:00. La rapprocher telle
+    quelle de l'index horaire donnerait au modèle, dès 00:00, une information
+    contenant les quatre heures suivantes — exactement ce qu'on lui demande de
+    prédire. Le décalage d'une bougie (`shift(1)`) garantit qu'à l'instant t le
+    modèle ne voit que des bougies supérieures INTÉGRALEMENT clôturées.
+
+    Retourne None si l'intervalle n'a pas de supérieur défini ou si
+    l'historique agrégé est trop court pour que les indicateurs se stabilisent.
+    """
+    superieur = config.INTERVALLE_SUPERIEUR.get(intervalle)
+    if superieur is None:
+        return None
+    libelle, regle = superieur
+
+    agrege = agreger(df, regle)
+    if len(agrege) < 100:                # 50 périodes de chauffe + marge
+        print(f"⚠️ Contexte {libelle} ignoré : seulement {len(agrege)} bougies agrégées.")
+        return None
+
+    contexte = calculer_indicateurs(agrege).shift(1)
+    contexte.columns = [nom + config.SUFFIXE_MTF for nom in contexte.columns]
+
+    # Report en avant sur l'index de base : entre deux bougies supérieures, la
+    # dernière valeur connue reste valable.
+    aligne = contexte.reindex(df.index.union(contexte.index)).ffill().reindex(df.index)
+    print(f"🔭 Contexte {libelle} : {len(contexte.columns)} colonnes ajoutées "
+          f"({len(agrege):,} bougies agrégées).")
+    return aligne
+
+
 def calculer_variations(close: pd.Series) -> pd.DataFrame:
     """
     Construit les 24 colonnes `variation_x`.
@@ -231,9 +286,40 @@ def calculer_variations(close: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(variations, index=close.index)
 
 
-def analyser(df_brut: pd.DataFrame) -> pd.DataFrame:
+def _filtrer_contexte(contexte: pd.DataFrame) -> pd.DataFrame:
     """
-    Pipeline complet : OHLCV -> prix + 8 indicateurs + 24 variations.
+    Écarte les colonnes de contexte trop clairsemées pour servir.
+
+    L'open interest public de Binance ne remonte qu'à 30 jours : sur plusieurs
+    années d'historique, la colonne serait vide à 99 %. La garder obligerait
+    soit à jeter tout l'historique, soit à inventer des valeurs. On la retire
+    tant qu'elle n'a pas été suffisamment accumulée (voir `exogene.py`, qui
+    fusionne chaque téléchargement avec le précédent).
+    """
+    gardees = {}
+    for nom in contexte.columns:
+        couverture = float(contexte[nom].notna().mean())
+        if couverture >= config.COUVERTURE_MINIMALE:
+            gardees[nom] = contexte[nom]
+        else:
+            print(f"   ⏭️  {nom} ignorée — {couverture:.0%} de couverture "
+                  f"(minimum {config.COUVERTURE_MINIMALE:.0%}).")
+    return pd.DataFrame(gardees, index=contexte.index)
+
+
+def analyser(df_brut: pd.DataFrame, symbole: str | None = None,
+             intervalle: str | None = None, contexte: bool = True) -> pd.DataFrame:
+    """
+    Pipeline complet : OHLCV -> prix + 8 indicateurs + contexte + 24 variations.
+
+    Le contexte, optionnel, regroupe deux familles de colonnes qui n'existaient
+    pas dans la version précédente :
+
+      * **multi-timeframe** — les 8 mêmes indicateurs calculés sur l'intervalle
+        supérieur (4h pour du 1h), décalés d'une bougie pour interdire toute
+        fuite du futur ;
+      * **exogènes** — funding rate et open interest, seules données du fichier
+        qui ne soient pas dérivées du prix.
 
     Les lignes de « chauffe » (indicateurs encore incalculables faute
     d'historique) sont supprimées. En revanche les dernières lignes, dont les
@@ -251,47 +337,96 @@ def analyser(df_brut: pd.DataFrame) -> pd.DataFrame:
     indicateurs = calculer_indicateurs(df)
     variations = calculer_variations(df["Close"].astype(float))
 
-    resultat = pd.concat([prix, indicateurs, variations], axis=1)
+    morceaux = [prix, indicateurs]
+    colonnes_contexte: list[str] = []
+    if contexte and intervalle:
+        supplements = _rassembler_contexte(df, symbole, intervalle)
+        if supplements is not None and not supplements.empty:
+            morceaux.append(supplements)
+            colonnes_contexte = list(supplements.columns)
+
+    resultat = pd.concat(morceaux + [variations], axis=1)
     resultat = resultat.replace([np.inf, -np.inf], np.nan)
 
-    # Chauffe : on ne garde que les lignes où les 8 indicateurs existent.
-    resultat = resultat.dropna(subset=config.INDICATEURS)
+    # Chauffe : on ne garde que les lignes où les indicateurs (base et
+    # multi-timeframe) existent. Les colonnes exogènes, elles, comportent
+    # légitimement des trous — on les neutralise plus bas plutôt que de
+    # sacrifier des années d'historique.
+    obligatoires = config.INDICATEURS + [c for c in colonnes_contexte
+                                         if c in config.INDICATEURS_MTF]
+    resultat = resultat.dropna(subset=obligatoires)
 
-    # Indicateurs et variations en float32 : la précision est largement
-    # suffisante (7 chiffres significatifs) et le fichier pèse deux fois moins.
-    # Les prix restent en float64 pour ne pas perdre les centimes.
-    colonnes_legeres = config.INDICATEURS + config.COLONNES_VARIATION
+    # Zéro est la valeur neutre des trois colonnes exogènes : funding nul
+    # (positionnement équilibré), cumul nul, open interest inchangé. C'est donc
+    # « aucune information » et non une valeur inventée.
+    exogenes = [c for c in colonnes_contexte if c in config.COLONNES_EXOGENES]
+    if exogenes:
+        resultat[exogenes] = resultat[exogenes].fillna(0.0)
+
+    # Tout ce qui n'est pas un prix passe en float32 : la précision est
+    # largement suffisante (7 chiffres significatifs) et le fichier pèse deux
+    # fois moins. Les prix restent en float64 pour ne pas perdre les centimes.
+    colonnes_legeres = (config.INDICATEURS + colonnes_contexte
+                        + config.COLONNES_VARIATION)
     resultat[colonnes_legeres] = resultat[colonnes_legeres].astype("float32")
 
     resultat.index.name = "Date"
-    return resultat[config.COLONNES_ANALYSE]
+    return resultat[config.colonnes_analyse(colonnes_contexte)]
 
 
-def analyser_fichier(symbole: str, intervalle: str) -> pd.DataFrame | None:
+def _rassembler_contexte(df: pd.DataFrame, symbole: str | None,
+                         intervalle: str) -> pd.DataFrame | None:
+    """Assemble les colonnes multi-timeframe et exogènes réellement utilisables."""
+    from . import exogene  # import tardif : dépend du réseau, pas du calcul
+
+    morceaux = []
+    superieur = calculer_indicateurs_superieurs(df, intervalle)
+    if superieur is not None:
+        morceaux.append(superieur)
+
+    if symbole:
+        try:
+            externe = exogene.contexte_exogene(symbole, intervalle, df.index)
+        except Exception as err:                       # noqa: BLE001
+            print(f"⚠️ Contexte exogène ignoré : {err}")
+            externe = None
+        if externe is not None:
+            morceaux.append(externe)
+
+    if not morceaux:
+        return None
+    return _filtrer_contexte(pd.concat(morceaux, axis=1))
+
+
+def analyser_fichier(symbole: str, intervalle: str,
+                     contexte: bool = True) -> pd.DataFrame | None:
     """Charge un fichier OHLCV brut, l'analyse et sauvegarde le résultat."""
     brut = stockage.lire_tableau(stockage.chemin_brut(symbole, intervalle))
     if brut is None or brut.empty:
         print(f"❌ Données brutes introuvables : {symbole} ({intervalle})")
         return None
 
-    analyse = analyser(brut)
+    analyse = analyser(brut, symbole, intervalle, contexte=contexte)
     chemin = stockage.chemin_analyse(symbole, intervalle)
     stockage.ecrire_tableau(analyse, chemin)
 
+    supplements = [c for c in analyse.columns if c in config.COLONNES_CONTEXTE]
     exploitables = int(analyse[config.colonne_variation(config.HORIZON_MAX)].notna().sum())
     print(f"✅ {symbole} ({intervalle}) — {len(analyse):,} lignes, "
-          f"{len(config.INDICATEURS)} indicateurs, {len(config.COLONNES_VARIATION)} variations "
+          f"{len(config.INDICATEURS)} indicateurs"
+          + (f" + {len(supplements)} de contexte" if supplements else "")
+          + f", {len(config.COLONNES_VARIATION)} variations "
           f"({exploitables:,} lignes entièrement étiquetées)")
     return analyse
 
 
-def analyser_tout() -> list[str]:
+def analyser_tout(contexte: bool = True) -> list[str]:
     """Analyse tous les fichiers bruts disponibles. Retourne les clés traitées."""
     traites = []
     for cle in stockage.lister_donnees_brutes():
         symbole, intervalle = stockage.separer_cle(cle)
         try:
-            if analyser_fichier(symbole, intervalle) is not None:
+            if analyser_fichier(symbole, intervalle, contexte) is not None:
                 traites.append(cle)
         except Exception as err:                       # noqa: BLE001
             print(f"❌ {cle} : {err}")
