@@ -100,6 +100,15 @@ class PageAnalyse:
                                                            contexte),
                       apres=apres)
 
+    # Les cinq familles de contexte, dans l'ordre d'apparition du fichier.
+    FAMILLES_CONTEXTE = (
+        ("multi-timeframe", "INDICATEURS_MTF"),
+        ("order flow", "COLONNES_FLUX"),
+        ("temps", "COLONNES_TEMPS"),
+        ("régime", "COLONNES_REGIME"),
+        ("exogènes", "COLONNES_EXOGENES"),
+    )
+
     def _resumer_contexte(self, df):
         """Dit lesquelles des colonnes optionnelles ont réellement été créées."""
         presentes = [c for c in config.COLONNES_CONTEXTE if c in df.columns]
@@ -108,17 +117,25 @@ class PageAnalyse:
                      "exploitable, ni données exogènes téléchargées.")
             return
 
-        mtf = [c for c in presentes if c in config.INDICATEURS_MTF]
-        exo = [c for c in presentes if c in config.COLONNES_EXOGENES]
-        manquantes = [c for c in config.COLONNES_EXOGENES if c not in presentes]
+        detail = []
+        for libelle, attribut in self.FAMILLES_CONTEXTE:
+            famille = getattr(config, attribut)
+            trouvees = [c for c in presentes if c in famille]
+            if trouvees:
+                detail.append(f"{len(trouvees)} {libelle}")
 
-        message = f"🔭 Contexte ajouté : {len(mtf)} colonnes multi-timeframe"
-        if exo:
-            message += f", {len(exo)} exogènes ({', '.join(exo)})"
-        if manquantes:
-            message += (f". Écartées faute de couverture suffisante : "
-                        f"{', '.join(manquantes)} — relance le téléchargement "
-                        f"exogène régulièrement pour les accumuler.")
+        # Ce qui manque compte autant que ce qui est là : une colonne écartée
+        # se rattrape (téléchargement exogène, ou order flow à re-télécharger),
+        # encore faut-il savoir laquelle.
+        absentes = [c for c in config.COLONNES_CONTEXTE
+                    if c not in presentes and c not in config.INDICATEURS_MTF]
+
+        message = f"🔭 Contexte ajouté : {len(presentes)} colonnes — {', '.join(detail)}."
+        if absentes:
+            message += (f" Absentes : {', '.join(absentes)}. L'order flow revient "
+                        f"avec un nouveau téléchargement ; le funding et le basis "
+                        f"avec le bouton 📡 ; l'open interest s'accumule sur "
+                        f"plusieurs mois.")
         self.log(message)
 
     def _action_analyser_tout(self):

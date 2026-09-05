@@ -4,7 +4,12 @@ Téléchargement des données de marché, en ligne de commande.
     python GatherData.py BTC ETH --intervalle 1h --debut 2022-01-01
     python GatherData.py --top 5 --intervalle 4h
     python GatherData.py BTC --source Yahoo --intervalle 1d
-    python GatherData.py BTC --exogene            # funding rate + open interest
+    python GatherData.py BTC --exogene            # funding, basis perp/spot, OI
+
+Chaque chandelier Binance embarque désormais deux colonnes d'order flow
+(nombre de trades, volume acheté à l'agressif), conservées automatiquement. Si
+tes fichiers datent d'avant, un simple retéléchargement les ajoute — c'est la
+seule information du fichier qui ne soit pas dérivée du prix.
 
 Le code est dans `crypto_lab/extraction.py` et `crypto_lab/exogene.py` ; ce
 fichier n'est que l'entrée en ligne de commande. Depuis l'interface : onglet
@@ -31,10 +36,12 @@ def analyser_arguments():
     parseur.add_argument("--source", default="Binance", choices=["Binance", "Yahoo"],
                          help="Source des données (défaut : Binance).")
     parseur.add_argument("--exogene", action="store_true",
-                         help="Télécharger aussi le funding rate et l'open interest "
-                              "(Binance Futures). Fusionné avec l'historique déjà "
-                              "collecté : l'open interest, public sur 30 jours "
-                              "seulement, s'accumule au fil des mises à jour.")
+                         help="Télécharger aussi le funding rate, le prix du contrat "
+                              "perpétuel (pour le basis) et l'open interest "
+                              "(Binance Futures). Funding et basis ont un historique "
+                              "complet dès le lancement du contrat ; l'open interest, "
+                              "public sur 30 jours seulement, s'accumule au fil des "
+                              "mises à jour.")
     return parseur.parse_args()
 
 

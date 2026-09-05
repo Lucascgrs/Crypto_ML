@@ -65,7 +65,7 @@ class PageDonnees:
                       command=self._action_telecharger).pack(side="left")
 
         bouton_exo = ctk.CTkButton(
-            boutons, text="📡 Funding & open interest", height=40,
+            boutons, text="📡 Funding, basis & open interest", height=40,
             fg_color=COULEURS["bleu"], hover_color="#0097a7",
             command=self._action_exogene)
         bouton_exo.pack(side="left", padx=10)

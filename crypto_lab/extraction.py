@@ -6,9 +6,12 @@ Trois sources :
   - **Yahoo Finance** : repli pour les cryptos absentes de Binance.
   - **CoinGecko** : classement des cryptos par capitalisation (Top N).
 
-Seul l'OHLCV est conservé : les 8 indicateurs n'ont besoin de rien d'autre.
-Les colonnes d'order-flow de l'ancienne version ont été retirées — elles
-alourdissaient les fichiers sans servir à aucune feature.
+On conserve l'OHLCV **et deux colonnes d'order flow** que Binance renvoie déjà
+dans chaque chandelier, sans requête supplémentaire : le nombre de trades et le
+volume acheté à l'agressif. Elles étaient jetées jusqu'ici, alors qu'elles sont
+la seule information du fichier qui ne soit pas dérivée du prix — voir
+`config.COLONNES_FLUX`. Yahoo ne les fournit pas : les cryptos rapatriées par
+ce repli n'auront simplement pas ces trois features.
 """
 
 from __future__ import annotations
@@ -82,12 +85,15 @@ def telecharger_binance(symbole: str, debut: str, fin: str,
     df["Date"] = pd.to_datetime(df["Open Time"], unit="ms")
     df = df.set_index("Date")
 
-    for colonne in config.COLONNES_PRIX:
+    for colonne in config.COLONNES_BRUTES:
         df[colonne] = pd.to_numeric(df[colonne], errors="coerce")
 
-    df = df[config.COLONNES_PRIX].dropna()
+    # Les colonnes d'order flow ne conditionnent pas la validité d'une bougie :
+    # on ne supprime une ligne que si son OHLCV est incomplet.
+    df = df[config.COLONNES_BRUTES].dropna(subset=config.COLONNES_PRIX)
     df = df[~df.index.duplicated(keep="last")].sort_index()
-    print(f"✅ {len(df):,} bougies récupérées.")
+    print(f"✅ {len(df):,} bougies récupérées "
+          f"(order flow inclus : {len(config.COLONNES_FLUX_BRUT)} colonnes).")
     return df
 
 

@@ -120,8 +120,9 @@ class PageAmplitude:
         self._maj_menu(self.amp_menu, self.amp_fichier, stockage.lister_analyses())
         self.amp_rappel.configure(
             text=f"Horizon {self.lire_horizon()} période(s) · seuil de confiance "
-                 f"{self.lire_seuil():.0%} — réglés sur l'onglet « 3 · Prédiction », "
-                 f"pour n'avoir qu'un seul endroit où les changer.")
+                 f"{self.lire_seuil():.0%} · objectif « {self._objectif().libelle} » "
+                 f"— réglés sur l'onglet « 3 · Prédiction », pour n'avoir qu'un seul "
+                 f"endroit où les changer.")
 
     def _reglages_amplitude(self):
         """(symbole, intervalle, horizon, seuil, modèle) ou None."""
@@ -157,7 +158,7 @@ class PageAmplitude:
             return volatilite, quantiles
 
         self.executer(f"Amplitude {symbole} ({intervalle}) h={horizon}", tache,
-                      apres=self._afficher_bilan_amplitude)
+                      apres=self._afficher_bilan_amplitude, suivre=True)
 
     def _afficher_bilan_amplitude(self, resultat):
         """Résume les deux régressions en une phrase lisible."""
@@ -205,9 +206,11 @@ class PageAmplitude:
                 return
             self._afficher_esperance(resultat, symbole, intervalle, horizon, seuil)
 
+        objectif = self._objectif()
         self.executer(
             f"Espérance {symbole} ({intervalle}) h={horizon}",
-            lambda: amplitude.esperance(symbole, intervalle, horizon, seuil),
+            lambda: amplitude.esperance(symbole, intervalle, horizon, seuil,
+                                        tache=objectif.cle),
             apres=apres)
 
     def _afficher_esperance(self, resultat, symbole, intervalle, horizon, seuil):

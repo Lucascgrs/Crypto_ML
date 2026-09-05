@@ -15,6 +15,12 @@ d'information vraiment neuve disponible gratuitement.
     Un funding durablement positif signale un positionnement acheteur tendu,
     souvent avant une purge. Déjà stationnaire, de l'ordre de 0.0001.
 
+  * **Basis perp/spot** — écart entre le prix du contrat perpétuel et celui du
+    spot, en %. Quand les acheteurs à levier dominent, le perpétuel se négocie
+    au-dessus du spot ; le basis mesure directement combien ils sont prêts à
+    payer pour rester exposés. Son historique est COMPLET dès le lancement du
+    contrat et se récupère en une seule passe, sans rien accumuler.
+
   * **Open interest** — nombre de contrats ouverts. C'est un NIVEAU, donc
     inutilisable tel quel : on en prend la variation sur 24 périodes. Un prix
     qui monte avec l'open interest en hausse, ce sont de nouvelles positions
@@ -51,10 +57,12 @@ from . import config, stockage
 
 URL_FUNDING = "https://fapi.binance.com/fapi/v1/fundingRate"
 URL_OPEN_INTEREST = "https://fapi.binance.com/futures/data/openInterestHist"
+URL_PERP = "https://fapi.binance.com/fapi/v1/klines"
 
 # Plafonds imposés par l'API publique.
 FUNDING_PAR_REQUETE = 1000
 OI_PAR_REQUETE = 500
+PERP_PAR_REQUETE = 1500
 
 # Périodes acceptées par l'endpoint open interest.
 PERIODES_OI = {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}
@@ -166,6 +174,94 @@ def telecharger_open_interest(symbole: str, intervalle: str) -> pd.Series | None
     return serie
 
 
+# Nombre maximum de périodes pendant lesquelles une valeur exogène peut être
+# reportée en avant. Un trou d'une ou deux bougies dans la série perpétuelle est
+# banal et sans conséquence ; au-delà, reporter ne produit pas une donnée
+# approximative, cela produit une donnée FAUSSE. Le cas réel qui a motivé cette
+# borne : une série tronquée au milieu de l'historique, dont la dernière valeur
+# se retrouvait reportée sur quatorze mois — soit exactement la période de test.
+REPORT_MAX = 3
+
+# Au-delà, on considère que la série s'arrête franchement trop tôt et on le dit.
+TOLERANCE_FIN_JOURS = 7
+
+
+def telecharger_perp(symbole: str, debut: str, fin: str,
+                     intervalle: str = "1h") -> pd.Series | None:
+    """
+    Clôtures du contrat PERPÉTUEL, à la granularité de l'intervalle de travail.
+
+    Sert uniquement à calculer le basis (écart perp/spot). Contrairement à
+    l'open interest, l'historique est intégral dès le lancement du contrat :
+    une seule passe suffit, il n'y a rien à accumuler dans le temps.
+    """
+    paire = f"{symbole}USDT"
+    curseur = _horodatage(debut)
+    limite = _horodatage(fin)
+
+    print(f"📥 [Binance Futures] perpétuel {paire} ({intervalle})…")
+    bougies: list[list] = []
+
+    while curseur < limite:
+        # Une coupure réseau passagère ne doit PAS tronquer silencieusement
+        # l'historique : une série coupée en son milieu est plus dangereuse
+        # qu'une série absente, parce qu'elle a l'air complète.
+        reponse = None
+        for tentative in range(3):
+            try:
+                reponse = requests.get(
+                    URL_PERP, timeout=20,
+                    params={"symbol": paire, "interval": intervalle,
+                            "startTime": curseur, "endTime": limite,
+                            "limit": PERP_PAR_REQUETE})
+                break
+            except requests.RequestException as err:
+                print(f"\n⚠️ Réseau ({tentative + 1}/3) : {err}")
+                time.sleep(1.5 * (tentative + 1))
+
+        if reponse is None:
+            print(f"\n⚠️ Perpétuel {paire} interrompu à "
+                  f"{datetime.fromtimestamp(curseur / 1000):%Y-%m-%d} après "
+                  f"trois tentatives — la série récupérée est INCOMPLÈTE. "
+                  f"Le basis sera vide au-delà de cette date plutôt que "
+                  f"reporté en avant (ce qui produirait une fausse feature).")
+            break
+
+        if reponse.status_code != 200:
+            print(f"⚠️ Perpétuel indisponible pour {paire} "
+                  f"(HTTP {reponse.status_code}) — basis ignoré.")
+            return None
+
+        lot = reponse.json()
+        if not lot:
+            break
+        bougies.extend(lot)
+        curseur = int(lot[-1][6]) + 1                  # index 6 = heure de clôture
+        print(f"\r   → {datetime.fromtimestamp(curseur / 1000):%Y-%m-%d}", end="")
+        time.sleep(0.1)                                # respect du quota public
+
+    print()
+    if not bougies:
+        print("⚠️ Aucune bougie perpétuelle récupérée.")
+        return None
+
+    manque = (limite - int(bougies[-1][6])) / 86_400_000
+    if manque > TOLERANCE_FIN_JOURS:
+        print(f"⚠️ La série perpétuelle s'arrête {manque:,.0f} jours avant la "
+              f"fin demandée ({datetime.fromtimestamp(int(bougies[-1][6]) / 1000):%Y-%m-%d}). "
+              f"Le basis sera vide sur cette période — relance "
+              f"« GatherData.py {symbole} --exogene » pour la compléter.")
+
+    df = pd.DataFrame(bougies)
+    serie = pd.Series(
+        pd.to_numeric(df[4], errors="coerce").to_numpy(),
+        index=pd.to_datetime(df[0], unit="ms"), name="Perp_Close")
+    serie = serie[~serie.index.duplicated(keep="last")].sort_index().dropna()
+    print(f"✅ {len(serie):,} bougies perpétuelles "
+          f"({serie.index.min():%Y-%m-%d} → {serie.index.max():%Y-%m-%d}).")
+    return serie
+
+
 # ===========================================================================
 # HISTORIQUE CUMULATIF SUR DISQUE
 # ===========================================================================
@@ -185,11 +281,13 @@ def mettre_a_jour(symbole: str, intervalle: str, debut: str = "2019-09-01",
     fin = fin or datetime.now().strftime("%Y-%m-%d")
 
     funding = telecharger_funding(symbole, debut, fin)
+    perp = telecharger_perp(symbole, debut, fin, intervalle)
     open_interest = telecharger_open_interest(symbole, intervalle)
-    if funding is None and open_interest is None:
+    series = [s for s in (funding, perp, open_interest) if s is not None]
+    if not series:
         return None
 
-    nouveau = pd.concat([s for s in (funding, open_interest) if s is not None], axis=1)
+    nouveau = pd.concat(series, axis=1)
     nouveau.index.name = "Date"
 
     chemin = stockage.chemin_exogene(symbole, intervalle)
@@ -229,7 +327,8 @@ def charger(symbole: str, intervalle: str) -> pd.DataFrame | None:
 # MISE AU FORMAT « FEATURE »
 # ===========================================================================
 def aligner(brut: pd.DataFrame, index: pd.Index,
-            fenetre: int = FENETRE_CUMUL) -> pd.DataFrame:
+            fenetre: int = FENETRE_CUMUL,
+            spot: pd.Series | None = None) -> pd.DataFrame:
     """
     Transforme les séries brutes en features stationnaires alignées sur `index`.
 
@@ -241,8 +340,10 @@ def aligner(brut: pd.DataFrame, index: pd.Index,
                       versement de 8 h sur une fenêtre de 24 h ; on somme donc
                       les événements, pas la série reportée.
       OI_Variation    variation de l'open interest sur la fenêtre, en %.
+      Basis           (perp / spot − 1) × 100 : la prime payée pour le levier.
+      Basis_Moyenne   sa moyenne sur la fenêtre — la tension de fond.
 
-    Toutes trois sont centrées sur zéro et sans unité de prix : elles se
+    Toutes sont centrées sur zéro et sans unité de prix : elles se
     comparent dans le temps et d'une crypto à l'autre, comme les 8 indicateurs.
     """
     resultat = pd.DataFrame(index=index)
@@ -265,20 +366,51 @@ def aligner(brut: pd.DataFrame, index: pd.Index,
                     minlength=len(index))
             resultat["Funding_Cumul"] = evenements.rolling(fenetre, min_periods=1).sum()
 
+    if "Perp_Close" in brut.columns and spot is not None:
+        perp = brut["Perp_Close"].dropna()
+        if not perp.empty:
+            # Le report en avant est BORNÉ des deux côtés. Sans cette borne, une
+            # série tronquée fait du basis une mesure de l'écart de prix depuis
+            # la troncature : une valeur qui dérive avec le marché, saturée à la
+            # limite du clip, et parfaitement corrélée au niveau du prix — soit
+            # précisément la fuite que la liste blanche des features interdit.
+            aligne = perp.reindex(index.union(perp.index)) \
+                         .ffill(limit=REPORT_MAX).reindex(index)
+            aligne[(index < perp.index.min()) | (index > perp.index.max())] = np.nan
+
+            couvert = float(aligne.notna().mean())
+            if couvert < 0.98:
+                print(f"ℹ️  Basis disponible sur {couvert:.0%} des lignes "
+                      f"(perpétuel jusqu'au {perp.index.max():%Y-%m-%d}). "
+                      f"Les lignes sans perpétuel restent VIDES : elles seront "
+                      f"neutralisées, pas inventées.")
+
+            reference = pd.to_numeric(spot.reindex(index), errors="coerce")
+            basis = (aligne / reference.replace(0, np.nan) - 1) * 100
+            # Le basis dépasse rarement ±1 % ; au-delà c'est un décalage
+            # d'horodatage ou une bougie manquante, pas une information.
+            resultat["Basis"] = basis.clip(-5, 5)
+            # `min_periods=1` sur une fenêtre entièrement vide rendrait NaN,
+            # ce qui est le comportement voulu : pas de moyenne sans données.
+            resultat["Basis_Moyenne"] = resultat["Basis"].rolling(
+                fenetre, min_periods=1).mean()
+
     if "Open_Interest" in brut.columns:
         oi = brut["Open_Interest"].dropna()
         if not oi.empty:
-            aligne = oi.reindex(index.union(oi.index)).ffill().reindex(index)
-            # Le report en avant ne doit pas inventer de données AVANT le premier
-            # point connu : ces lignes restent vides, et c'est voulu.
-            aligne[index < oi.index.min()] = np.nan
+            aligne = oi.reindex(index.union(oi.index)) \
+                       .ffill(limit=REPORT_MAX).reindex(index)
+            # Le report en avant ne doit inventer de données ni AVANT le premier
+            # point connu, ni APRÈS le dernier : ces lignes restent vides, et
+            # c'est voulu.
+            aligne[(index < oi.index.min()) | (index > oi.index.max())] = np.nan
             resultat["OI_Variation"] = aligne.pct_change(fenetre) * 100
 
     return resultat.replace([np.inf, -np.inf], np.nan)
 
 
-def contexte_exogene(symbole: str, intervalle: str,
-                     index: pd.Index) -> pd.DataFrame | None:
+def contexte_exogene(symbole: str, intervalle: str, index: pd.Index,
+                     spot: pd.Series | None = None) -> pd.DataFrame | None:
     """
     Colonnes exogènes prêtes à concaténer, ou None si rien n'est disponible.
 
@@ -288,7 +420,7 @@ def contexte_exogene(symbole: str, intervalle: str,
     brut = charger(symbole, intervalle)
     if brut is None:
         return None
-    aligne = aligner(brut, index)
+    aligne = aligner(brut, index, spot=spot)
     return aligne if not aligne.empty and aligne.notna().any().any() else None
 
 

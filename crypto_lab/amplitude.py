@@ -53,7 +53,7 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 
-from . import cibles, config, modele, ressources, stockage
+from . import cibles, config, modele, ressources, stockage, suivi
 
 try:
     from xgboost import XGBRegressor
@@ -212,21 +212,50 @@ def _construire(nom: str, params: dict, res: ressources.Ressources,
                      f"Disponibles : {', '.join(modeles_disponibles())}.")
 
 
-def _ajuster(regresseur, nom: str, X_tr, y_tr, X_val, y_val) -> int:
-    """Entraîne un régresseur, avec early stopping sur la validation si supporté."""
+def _ajuster(regresseur, nom: str, X_tr, y_tr, X_val, y_val,
+             etiquette: str = "") -> int:
+    """
+    Entraîne un régresseur, avec early stopping sur la validation si supporté.
+
+    Les callbacks de suivi sont ceux de `modele.py` : la fenêtre de suivi et le
+    bouton d'arrêt fonctionnent donc ici exactement comme pour la
+    classification, sans dupliquer la gestion des trois librairies de boosting.
+    """
+    suivre = bool(etiquette) and suivi.MONITEUR.actif
+
     if nom == "XGBoost":
+        if suivre:
+            rappel = modele._callback_xgb(etiquette)
+            if rappel is not None:
+                try:
+                    regresseur.set_params(callbacks=[rappel])
+                except (TypeError, ValueError):        # pragma: no cover
+                    pass
         regresseur.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+        modele._detacher_callbacks(regresseur)
         return int(getattr(regresseur, "best_iteration", 0) or 0)
 
     if nom == "LightGBM":
-        regresseur.fit(X_tr, y_tr, eval_set=[(X_val, y_val)],
-                       callbacks=[early_stopping(config.PATIENCE_EARLY_STOP, verbose=False),
-                                  log_evaluation(0)])
+        rappels = [early_stopping(config.PATIENCE_EARLY_STOP, verbose=False),
+                   log_evaluation(0)]
+        if suivre:
+            rappel = modele._callback_lgbm(etiquette)
+            if rappel is not None:
+                rappels.append(rappel)
+        regresseur.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], callbacks=rappels)
         return int(getattr(regresseur, "best_iteration_", 0) or 0)
 
     if nom == "CatBoost":
-        regresseur.fit(X_tr, y_tr, eval_set=(X_val, y_val),
-                       early_stopping_rounds=config.PATIENCE_EARLY_STOP, verbose=False)
+        commun = dict(eval_set=(X_val, y_val), verbose=False,
+                      early_stopping_rounds=config.PATIENCE_EARLY_STOP)
+        rappel = modele._callback_catboost(etiquette) if suivre else None
+        if rappel is not None:
+            try:
+                regresseur.fit(X_tr, y_tr, callbacks=[rappel], **commun)
+                return int(regresseur.get_best_iteration() or 0)
+            except Exception:                          # noqa: BLE001
+                pass
+        regresseur.fit(X_tr, y_tr, **commun)
         return int(regresseur.get_best_iteration() or 0)
 
     # HistGradientBoosting gère son propre early stopping en interne.
@@ -371,7 +400,7 @@ def entrainer(symbole: str, intervalle: str, horizon: int,
     res = ressources.detecter(int(jeu.X.memory_usage(deep=True).sum()))
     print(res.resume())
 
-    decoupage = modele._decouper(len(jeu.X), horizon)       # noqa: SLF001
+    decoupage = modele._decouper(jeu.X.index, horizon, intervalle)  # noqa: SLF001
     if min(len(decoupage.train), len(decoupage.validation), len(decoupage.test)) < 50:
         raise ValueError("Historique trop court pour une régression fiable.")
 
@@ -388,16 +417,26 @@ def entrainer(symbole: str, intervalle: str, horizon: int,
     quantiles = config.QUANTILES if cible == "amplitude" else (None,)
     modeles, iterations, params_retenus = {}, {}, {}
 
-    for quantile in quantiles:
+    for numero_q, quantile in enumerate(quantiles):
+        # Une regression d'amplitude entraine un modele par quantile : c'est
+        # long, donc c'est suivi et interruptible comme le reste.
+        suivi.verifier()
         etiquette = (f"quantile {quantile:.0%}" if quantile is not None
                      else "erreur absolue")
         print(f"\n🔎 Réglage automatique — {etiquette} "
               f"({len(CONFIGURATIONS[nom_modele])} configurations)…")
 
         essais = []
-        for params in CONFIGURATIONS[nom_modele]:
+        candidates = CONFIGURATIONS[nom_modele]
+        total_essais = max(1, len(quantiles) * len(candidates))
+        for numero_c, params in enumerate(candidates):
+            suivi.verifier()
+            suivi.etape(f"{etiquette} — configuration {numero_c + 1}"
+                        f"/{len(candidates)}",
+                        (numero_q * len(candidates) + numero_c) / total_essais)
             candidat = _construire(nom_modele, params, res, quantile)
-            n_arbres = _ajuster(candidat, nom_modele, X_tr, y_tr, X_val, y_val)
+            n_arbres = _ajuster(candidat, nom_modele, X_tr, y_tr, X_val, y_val,
+                                etiquette=f"{etiquette} · config {numero_c + 1}")
             pertes = _pertes_individuelles(y_val, candidat.predict(X_val), quantile)
             essais.append((candidat, float(pertes.mean()), params, n_arbres,
                            _erreur_type(pertes)))
@@ -681,6 +720,45 @@ def predire(symbole: str, intervalle: str, horizon: int,
 # ===========================================================================
 # ESPÉRANCE DE GAIN — direction × amplitude
 # ===========================================================================
+def _tache_direction(symbole: str, intervalle: str, horizon: int,
+                     tache: str | None) -> str:
+    """
+    Choisit l'objectif de direction à combiner avec l'amplitude.
+
+    L'espérance a besoin d'un P(hausse) : n'importe lequel des objectifs de
+    classification en fournit un. Plutôt que d'exiger celui qui est affiché
+    dans l'interface, on regarde ce qui existe vraiment sur le disque — si un
+    seul modèle est entraîné à cet horizon, c'est forcément celui-là qu'on
+    voulait.
+    """
+    disponibles = stockage.taches_entrainees(symbole, intervalle, horizon)
+    demandee = cibles.obtenir(tache).cle
+
+    if demandee in disponibles:
+        return demandee
+
+    if not disponibles:
+        raise FileNotFoundError(
+            f"Aucun modèle de direction pour {symbole} ({intervalle}) à l'horizon "
+            f"{horizon}. Va dans « 3 · Prédiction » et lance un entraînement : "
+            f"l'espérance combine une direction et une amplitude, il lui faut "
+            f"les deux.")
+
+    if len(disponibles) == 1:
+        remplacante = disponibles[0]
+        print(f"ℹ️  Objectif « {cibles.obtenir(demandee).libelle} » non entraîné à "
+              f"cet horizon — j'utilise le seul disponible : "
+              f"« {cibles.obtenir(remplacante).libelle} ».")
+        return remplacante
+
+    libelles = ", ".join(f"« {cibles.obtenir(c).libelle} »" for c in disponibles)
+    raise FileNotFoundError(
+        f"Objectif « {cibles.obtenir(demandee).libelle} » non entraîné pour "
+        f"{symbole} ({intervalle}) à l'horizon {horizon}. Objectifs disponibles à "
+        f"cet horizon : {libelles} — choisis-en un sur la page Prédiction, ou "
+        f"entraîne celui qui manque.")
+
+
 def esperance(symbole: str, intervalle: str, horizon: int,
               seuil_confiance: float = config.SEUIL_DEFAUT,
               tache: str | None = None,
@@ -708,6 +786,7 @@ def esperance(symbole: str, intervalle: str, horizon: int,
     horizon = int(np.clip(horizon, 1, config.HORIZON_MAX))
     print(f"\n🧮 Espérance de gain — {symbole} ({intervalle}) | horizon {horizon}")
 
+    tache = _tache_direction(symbole, intervalle, horizon, tache)
     direction = modele.predire(symbole, intervalle, horizon, seuil_confiance,
                                tache=tache)
     volatilite = predire(symbole, intervalle, horizon, "volatilite")

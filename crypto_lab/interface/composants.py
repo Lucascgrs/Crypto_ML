@@ -130,6 +130,90 @@ class FenetreExplication(ctk.CTkToplevel):
         self.after(120, self.lift)      # passe devant la fenêtre principale
 
 
+class FenetrePanier(ctk.CTkToplevel):
+    """
+    Choix des cryptos à empiler dans un même modèle.
+
+    Une liste de cases à cocher, deux boutons, rien d'autre : le panier ne doit
+    pas devenir un formulaire. Tout ce qui compte — l'alignement des dates, la
+    normalisation entre actifs, le choix des features communes — est décidé
+    automatiquement et expliqué dans l'infobulle de la page.
+    """
+
+    def __init__(self, parent, cryptos, selection, resume, au_valider):
+        super().__init__(parent)
+        self.title("Panier de cryptos")
+        self.geometry("460x560")
+        self.configure(fg_color=COULEURS["fond"])
+        self.transient(parent)
+        self.au_valider = au_valider
+        self.cases = {}
+
+        ctk.CTkLabel(self, text="🧺  Entraîner sur plusieurs cryptos",
+                     font=ctk.CTkFont(size=18, weight="bold")
+                     ).pack(anchor="w", padx=24, pady=(20, 4))
+        ctk.CTkLabel(
+            self, justify="left", wraplength=400,
+            text=("Un seul modèle, entraîné sur toutes les cryptos cochées.\n"
+                  "Les blocs d'apprentissage, de validation et de test sont "
+                  "coupés aux MÊMES DATES pour chacune : chaque crypto apprend "
+                  "sur tout l'historique dont elle dispose avant la frontière, "
+                  "et toutes sont jugées sur la même période de marché."),
+            font=ctk.CTkFont(size=12), text_color=COULEURS["texte_doux"]
+            ).pack(anchor="w", padx=24, pady=(0, 12))
+
+        liste = ctk.CTkScrollableFrame(self, fg_color=COULEURS["panneau"])
+        liste.pack(fill="both", expand=True, padx=24, pady=(0, 10))
+        for symbole in cryptos:
+            variable = ctk.BooleanVar(value=symbole in selection)
+            case = ctk.CTkCheckBox(liste, text=symbole, variable=variable,
+                                   command=self._maj_resume)
+            case.pack(anchor="w", padx=12, pady=4)
+            self.cases[symbole] = variable
+
+        self.resume = resume
+        self.etiquette = ctk.CTkLabel(self, text="", justify="left", wraplength=400,
+                                      font=ctk.CTkFont(size=12),
+                                      text_color=COULEURS["texte_doux"])
+        self.etiquette.pack(anchor="w", padx=24, pady=(0, 8))
+
+        boutons = ctk.CTkFrame(self, fg_color="transparent")
+        boutons.pack(fill="x", padx=24, pady=(0, 20))
+        ctk.CTkButton(boutons, text="Tout cocher", width=110,
+                      fg_color=COULEURS["carte"],
+                      command=lambda: self._tout(True)).pack(side="left")
+        ctk.CTkButton(boutons, text="Tout décocher", width=110,
+                      fg_color=COULEURS["carte"],
+                      command=lambda: self._tout(False)).pack(side="left", padx=8)
+        ctk.CTkButton(boutons, text="Valider", width=110,
+                      command=self._valider).pack(side="right")
+
+        self._maj_resume()
+        self.after(120, self.lift)
+
+    def _tout(self, valeur):
+        for variable in self.cases.values():
+            variable.set(valeur)
+        self._maj_resume()
+
+    def selection(self):
+        return [symbole for symbole, variable in self.cases.items() if variable.get()]
+
+    def _maj_resume(self):
+        choisies = self.selection()
+        if len(choisies) < 2:
+            self.etiquette.configure(
+                text="Coche au moins deux cryptos (une seule = modèle ordinaire).",
+                text_color=COULEURS["orange"])
+            return
+        self.etiquette.configure(text=self.resume(choisies),
+                                 text_color=COULEURS["texte_doux"])
+
+    def _valider(self):
+        self.au_valider(self.selection())
+        self.destroy()
+
+
 # ===========================================================================
 # FABRIQUES DE WIDGETS
 # ===========================================================================
@@ -212,12 +296,18 @@ class MixinComposants:
         return colonne, variable, menu
 
     def _curseur(self, parent, libelle, mini, maxi, defaut, aide=None,
-                 largeur=260, format_valeur="{:.0f}", nb_pas=None):
+                 largeur=260, format_valeur="{:.0f}", nb_pas=None,
+                 au_changement=None):
         """
         Curseur avec sa valeur affichée en direct.
 
         Retourne (colonne, curseur) ; la valeur se lit avec `curseur.get()`.
         Plus lisible qu'un champ texte pour une valeur bornée comme l'horizon.
+
+        `au_changement` est rappelé à chaque déplacement, après la mise à jour
+        de la valeur affichée. Il sert aux curseurs dont l'effet doit être
+        visible AVANT de lancer quoi que ce soit — celui de l'utilité minimale
+        annonce ainsi le nombre de features conservées à chaque cran.
         """
         colonne = ctk.CTkFrame(parent, fg_color="transparent")
         entete = self._etiquette(colonne, libelle, aide)
@@ -232,8 +322,13 @@ class MixinComposants:
         curseur = ctk.CTkSlider(colonne, from_=mini, to=maxi, width=largeur,
                                 number_of_steps=pas)
         curseur.set(defaut)
-        curseur.configure(command=lambda v: valeur_affichee.configure(
-            text=format_valeur.format(v)))
+
+        def _deplace(valeur):
+            valeur_affichee.configure(text=format_valeur.format(valeur))
+            if au_changement is not None:
+                au_changement(valeur)
+
+        curseur.configure(command=_deplace)
         curseur.pack(anchor="w", pady=(4, 0))
         return colonne, curseur
 

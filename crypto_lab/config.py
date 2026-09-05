@@ -47,6 +47,19 @@ def preparer_dossiers() -> None:
 # prix sort de la plage apprise.
 COLONNES_PRIX = ["Open", "High", "Low", "Close", "Volume"]
 
+# Colonnes d'ORDER FLOW conservées telles quelles depuis les chandeliers Binance.
+# Ce ne sont pas des features (ce sont des niveaux), mais la matière première de
+# `COLONNES_FLUX` ci-dessous. Binance les renvoie dans chaque kline sans coût
+# supplémentaire : les jeter revenait à se priver de la seule information du
+# fichier qui ne soit pas dérivée du prix.
+#
+#   Trades     nombre de transactions dans la bougie
+#   TakerBase  volume exécuté par des ACHETEURS agressifs (ordres au marché)
+COLONNES_FLUX_BRUT = ["Trades", "TakerBase"]
+
+# Colonnes du fichier brut : OHLCV + order flow quand la source le fournit.
+COLONNES_BRUTES = COLONNES_PRIX + COLONNES_FLUX_BRUT
+
 
 # ===========================================================================
 # LES 8 INDICATEURS (= LES FEATURES DU MODÈLE)
@@ -130,16 +143,126 @@ INTERVALLE_SUPERIEUR = {
 #   OI_Variation     variation de l'open interest sur 24 périodes, en %.
 #                    L'open interest brut est un niveau (donc inutilisable) ;
 #                    sa variation dit si des positions s'ouvrent ou se soldent.
-COLONNES_EXOGENES = ["Funding_Rate", "Funding_Cumul", "OI_Variation"]
+#   Basis            écart entre le perpétuel et le spot, en %. Positif = les
+#                    acheteurs paient une prime pour rester exposés à effet de
+#                    levier. Historique COMPLET dès le lancement du contrat,
+#                    récupérable en une fois — contrairement à l'open interest.
+#   Basis_Moyenne    moyenne du basis sur 24 périodes : la tension de fond.
+COLONNES_EXOGENES = ["Funding_Rate", "Funding_Cumul", "OI_Variation",
+                     "Basis", "Basis_Moyenne"]
 
 LIBELLES_EXOGENES = {
     "Funding_Rate":  "Funding rate — coût de portage des positions longues",
     "Funding_Cumul": "Funding cumulé 24p — persistance du déséquilibre",
     "OI_Variation":  "Open interest, variation 24p (%) — flux de positions",
+    "Basis":         "Basis perp/spot (%) — prime payée pour le levier",
+    "Basis_Moyenne": "Basis moyen 24p — tension de fond du marché à terme",
 }
 
+
+# ===========================================================================
+# ORDER FLOW (qui achète, qui vend — déjà dans les chandeliers téléchargés)
+# ===========================================================================
+# Le prix dit ce qui s'est passé ; l'order flow dit QUI l'a provoqué. Un même
+# chandelier haussier n'a pas le même sens selon qu'il vient d'acheteurs
+# agressifs (ordres au marché) ou de vendeurs passifs qui se retirent.
+#
+#   Flux_Desequilibre  2 × TakerBase / Volume − 1, donc entre −1 et +1.
+#                      +0.2 = 60 % du volume est parti à l'achat agressif.
+#   Flux_Cumul         moyenne du déséquilibre sur 12 périodes — la pression
+#                      soutenue, bien plus informative que le point isolé.
+#   Taille_Trade_Norm  log(taille moyenne d'un trade / sa médiane récente).
+#                      Positif = de gros intervenants, négatif = poussière de
+#                      détail. Le log-ratio rend la mesure stationnaire et
+#                      comparable d'une crypto à l'autre.
+COLONNES_FLUX = ["Flux_Desequilibre", "Flux_Cumul", "Taille_Trade_Norm"]
+
+LIBELLES_FLUX = {
+    "Flux_Desequilibre": "Déséquilibre acheteurs/vendeurs agressifs (−1 à +1)",
+    "Flux_Cumul":        "Déséquilibre moyen 12p — pression soutenue",
+    "Taille_Trade_Norm": "Taille de trade vs sa médiane — gros ou petits acteurs",
+}
+
+FENETRE_FLUX = 12        # périodes cumulées pour Flux_Cumul
+FENETRE_TAILLE = 100     # médiane de référence de la taille de trade
+
+
+# ===========================================================================
+# TEMPS : SAISONNALITÉ ET CYCLE DE FUNDING
+# ===========================================================================
+# Le crypto se négocie 24 h/24, mais pas de façon uniforme : les volumes et la
+# volatilité suivent les séances asiatique, européenne et américaine, et le
+# funding tombe toutes les 8 h (00:00, 08:00, 16:00 UTC), ce qui déplace
+# mécaniquement des positions juste avant.
+#
+# L'heure est CIRCULAIRE : 23 h est aussi proche de 0 h que de 22 h. La coder
+# comme un nombre de 0 à 23 apprendrait au modèle une frontière absurde entre
+# 23 h et minuit. Le couple sinus/cosinus supprime le problème.
+COLONNES_TEMPS = ["Heure_Sin", "Heure_Cos", "Jour_Semaine", "Avant_Funding"]
+
+LIBELLES_TEMPS = {
+    "Heure_Sin":     "Heure du jour (sinus) — séance asiatique / US",
+    "Heure_Cos":     "Heure du jour (cosinus) — séance asiatique / US",
+    "Jour_Semaine":  "Jour de la semaine (0 = lundi) — week-end moins liquide",
+    "Avant_Funding": "Part du cycle de 8 h écoulée avant le prochain funding",
+}
+
+# Le funding est versé toutes les 8 heures sur Binance.
+CYCLE_FUNDING_HEURES = 8
+
+
+# ===========================================================================
+# RÉGIME DE MARCHÉ
+# ===========================================================================
+# Un modèle qui apprend en même temps le bull 2021 et le range 2023 apprend la
+# moyenne des deux, qui ne s'est jamais produite. Plutôt que d'entraîner un
+# modèle par régime — ce qui divise les données au moment où elles manquent le
+# plus — on donne au modèle de quoi RECONNAÎTRE le régime, à charge pour les
+# arbres de conditionner leurs règles dessus.
+#
+#   Regime_Volatilite  rang de percentile de l'ATR sur les 500 dernières
+#                      périodes (0 = le plus calme jamais vu, 1 = le plus
+#                      agité). L'ATR brut ne dit pas si 1.2 % est beaucoup :
+#                      ça l'est pour du BTC, pas pour un altcoin récent.
+#   Regime_Tendance    écart à la moyenne 200 périodes, exprimé en ATR.
+#                      +3 = « trois bougies moyennes au-dessus de la tendance
+#                      longue » — comparable entre cryptos et entre époques.
+COLONNES_REGIME = ["Regime_Volatilite", "Regime_Tendance"]
+
+LIBELLES_REGIME = {
+    "Regime_Volatilite": "Volatilité actuelle vs ses 500 dernières périodes (0-1)",
+    "Regime_Tendance":   "Écart à la moyenne 200p, mesuré en ATR",
+}
+
+FENETRE_REGIME = 500     # profondeur du rang de percentile
+FENETRE_TENDANCE = 200   # moyenne longue de référence
+
 # Toutes les colonnes de contexte optionnelles, dans l'ordre.
-COLONNES_CONTEXTE = INDICATEURS_MTF + COLONNES_EXOGENES
+COLONNES_CONTEXTE = (INDICATEURS_MTF + COLONNES_FLUX + COLONNES_TEMPS
+                     + COLONNES_REGIME + COLONNES_EXOGENES)
+
+# Libellés de toutes les colonnes, base et contexte confondus.
+LIBELLES_COLONNES = {**LIBELLES_INDICATEURS, **LIBELLES_EXOGENES,
+                     **LIBELLES_FLUX, **LIBELLES_TEMPS, **LIBELLES_REGIME,
+                     **{nom + SUFFIXE_MTF: libelle + " (intervalle supérieur)"
+                        for nom, libelle in LIBELLES_INDICATEURS.items()}}
+
+# Seules les colonnes multi-timeframe sont exigées ligne à ligne : ce sont des
+# indicateurs, un trou y est un vrai trou. Toutes les autres colonnes de
+# contexte ont une valeur NEUTRE bien définie (zéro : flux équilibré, funding
+# nul, basis nul, taille de trade médiane), ce qui permet de conserver
+# l'historique antérieur à leur existence au lieu de le sacrifier.
+COLONNES_NEUTRALISABLES = [c for c in COLONNES_CONTEXTE if c not in INDICATEURS_MTF]
+
+# Valeur qui signifie « aucune information » pour chaque colonne. Zéro convient
+# presque partout (flux équilibré, funding nul, écart nul à la tendance) ; le
+# régime de volatilité est un rang de percentile, dont le point neutre est 0.5.
+VALEURS_NEUTRES = {"Regime_Volatilite": 0.5}
+
+
+def valeur_neutre(colonne: str) -> float:
+    """Valeur de remplissage d'une colonne de contexte absente ou trouée."""
+    return VALEURS_NEUTRES.get(colonne, 0.0)
 
 # Part minimale de lignes renseignées pour qu'une colonne de contexte soit
 # retenue comme feature. L'open interest public de Binance ne remonte qu'à
@@ -299,3 +422,209 @@ BARRIERE_SL_ATR = 1.0
 # position dérisoire, ni levier.
 FRACTION_MINIMALE = 0.10
 FRACTION_MAXIMALE = 1.00
+
+
+# ===========================================================================
+# DURÉE D'UNE PÉRIODE
+# ===========================================================================
+# Nécessaire dès qu'on raisonne en DATES plutôt qu'en numéros de ligne : le
+# découpage train/validation/test et l'embargo anti-fuite le font désormais,
+# afin qu'un panier de plusieurs cryptos soit coupé aux mêmes dates pour toutes.
+HEURES_INTERVALLE = {"1h": 1, "2h": 2, "4h": 4, "6h": 6, "12h": 12, "1d": 24}
+
+
+def heures(intervalle: str) -> float:
+    """Durée d'une période, en heures. 1 par défaut si l'intervalle est inconnu."""
+    return float(HEURES_INTERVALLE.get(intervalle, 1))
+
+
+# ===========================================================================
+# PANIER : PLUSIEURS CRYPTOS DANS UN SEUL MODÈLE
+# ===========================================================================
+# Chercher un avantage de quelques points sur 50 000 lignes d'une seule crypto,
+# c'est chercher un signal faible dans très peu de données. Les 8 indicateurs
+# sont conçus pour être comparables d'un actif à l'autre : rien n'empêche donc
+# d'empiler 20 cryptos et d'entraîner UN modèle sur 1 000 000 de lignes.
+#
+# Le nom du panier tient lieu de symbole partout ailleurs (fichiers de modèle,
+# métadonnées, prédictions). Il utilise le tiret comme séparateur, jamais le
+# souligné, qui sert déjà à séparer symbole et intervalle dans les noms de
+# fichiers.
+PREFIXE_PANIER = "PANIER-"
+
+# Fenêtre du rang de percentile appliqué à chaque feature, crypto par crypto,
+# quand on mélange plusieurs actifs. 720 périodes = 30 jours en 1h.
+FENETRE_RANG_PANIER = 720
+
+# Features déjà comparables d'une crypto à l'autre : bornées par construction
+# (RSI et stochastique entre 0 et 100, %B autour de [0,1], ADX entre 0 et 100,
+# déséquilibre de flux entre −1 et +1, rang de volatilité entre 0 et 1, heure
+# et jour de la semaine). Un RSI de 80 veut dire la même chose sur BTC et sur
+# un altcoin : les normaliser leur ferait perdre ce sens absolu.
+#
+# Toutes les autres sont des grandeurs dont le NIVEAU dépend de l'actif : un
+# ATR de 0.5 % est une tempête pour BTC et un jour ordinaire pour un altcoin.
+# Empilées telles quelles dans un panier, elles apprendraient au modèle à
+# reconnaître la crypto plutôt que la situation. On les remplace donc par leur
+# rang de percentile glissant, calculé crypto par crypto et uniquement sur le
+# passé — « où en est cet actif par rapport à SES 30 derniers jours ».
+FEATURES_BORNEES = frozenset(
+    ["RSI_14", "Stoch_K", "BB_Position", "ADX_14", "OBV_Pct"]
+    + [nom + SUFFIXE_MTF for nom in ("RSI_14", "Stoch_K", "BB_Position",
+                                     "ADX_14", "OBV_Pct")]
+    + COLONNES_TEMPS
+    + ["Regime_Volatilite", "Flux_Desequilibre", "Flux_Cumul"])
+
+
+def colonnes_a_normaliser(colonnes) -> list[str]:
+    """Features dont le niveau dépend de l'actif, donc à convertir en rang."""
+    return [str(nom) for nom in colonnes if str(nom) not in FEATURES_BORNEES]
+
+# Au-delà, les noms de fichiers deviennent illisibles et le modèle mélange des
+# actifs qui n'ont plus grand-chose en commun.
+CRYPTOS_MAX_PANIER = 25
+
+
+def nom_panier(symboles) -> str:
+    """['BTC', 'ETH'] -> 'PANIER-BTC-ETH' (ordre alphabétique, sans doublon)."""
+    propres = sorted({str(s).upper().replace("_", "").replace("-", "")
+                      for s in symboles if str(s).strip()})
+    return PREFIXE_PANIER + "-".join(propres)
+
+
+def est_panier(symbole: str) -> bool:
+    """Vrai si ce « symbole » désigne en réalité un panier de cryptos."""
+    return str(symbole).startswith(PREFIXE_PANIER)
+
+
+def symboles_panier(nom: str) -> list[str]:
+    """'PANIER-BTC-ETH' -> ['BTC', 'ETH']. Liste vide si ce n'est pas un panier."""
+    if not est_panier(nom):
+        return []
+    return [s for s in nom[len(PREFIXE_PANIER):].split("-") if s]
+
+
+# ===========================================================================
+# VALIDATION CROISÉE PURGÉE
+# ===========================================================================
+# Choisir entre trois configurations sur un seul bloc de validation revient à
+# trancher sur du bruit : les AUC obtenues diffèrent de quelques millièmes
+# quand la marge d'erreur est de l'ordre du centième. En découpant la période
+# d'apprentissage en blocs chronologiques successifs, on obtient N mesures au
+# lieu d'une, donc un écart-type réel — et la règle « à un écart-type » cesse
+# d'être une approximation.
+#
+# « Purgée » : autour de chaque bloc d'évaluation, les lignes dont la cible
+# empiète sur ce bloc sont retirées de l'apprentissage. Sans cela, la fin d'un
+# bloc d'entraînement connaît déjà le début du bloc évalué.
+BLOCS_CV = 4
+
+# Un bloc de validation croisée doit rester assez gros pour que son AUC
+# signifie quelque chose.
+LIGNES_MIN_BLOC_CV = 2000
+
+# ===========================================================================
+# PROFONDEUR DE LA RECHERCHE D'HYPERPARAMÈTRES
+# ===========================================================================
+# Trois configurations écrites à la main suffisent quand le signal est franc.
+# Sur des données aussi bruitées que le marché, elles ne couvrent qu'un coin
+# minuscule de l'espace des réglages : rien ne dit que la bonne profondeur
+# d'arbre est 3, 4 ou 6 plutôt que 5, ni que le bon taux d'apprentissage est
+# 0.02 plutôt que 0.012.
+#
+# Les modes ci-dessous ajoutent une recherche ALÉATOIRE autour de ces trois
+# points de départ, évaluée avec la même validation croisée purgée et la même
+# règle du 1 écart-type. Deux garde-fous :
+#
+#   * les trois configurations d'origine font toujours partie du tirage, donc
+#     une recherche longue ne peut jamais rendre un résultat PIRE qu'une
+#     recherche courte ;
+#   * les candidates sont classées de la plus prudente à la plus souple, si
+#     bien qu'à égalité statistique c'est toujours la plus simple qui gagne.
+#
+# Ce qu'il ne faut pas en attendre : un modèle deux fois plus long à entraîner
+# n'est pas deux fois plus précis. Sur un jeu où la marge d'erreur de l'AUC est
+# de l'ordre de 0.01, explorer 40 configurations au lieu de 3 déplace le
+# résultat de quelques millièmes — c'est-à-dire de moins que le bruit. La
+# recherche approfondie sert surtout à VÉRIFIER que le réglage par défaut
+# n'était pas franchement mauvais.
+RECHERCHE_RAPIDE = "rapide"
+RECHERCHE_APPROFONDIE = "approfondie"
+RECHERCHE_EXHAUSTIVE = "exhaustive"
+RECHERCHE_DEFAUT = RECHERCHE_RAPIDE
+
+MODES_RECHERCHE = {
+    RECHERCHE_RAPIDE: {
+        "libelle": "Rapide — 3 configurations",
+        "n_configurations": 3,
+        "description": ("Les trois réglages de référence (prudent, équilibré, "
+                        "souple). Quelques secondes à quelques minutes."),
+    },
+    RECHERCHE_APPROFONDIE: {
+        "libelle": "Approfondie — 18 configurations",
+        "n_configurations": 18,
+        "description": ("Les trois références plus quinze tirages aléatoires "
+                        "autour d'elles. Compte environ six fois le temps du "
+                        "mode rapide."),
+    },
+    RECHERCHE_EXHAUSTIVE: {
+        "libelle": "Exhaustive — 40 configurations",
+        "n_configurations": 40,
+        "description": ("Balayage large de l'espace des réglages. Long, et le "
+                        "gain attendu reste inférieur à la marge d'erreur de "
+                        "l'AUC — à réserver à une vérification ponctuelle."),
+    },
+}
+
+
+def mode_recherche(cle: str | None) -> dict:
+    """Descriptif d'un mode de recherche, mode rapide par défaut."""
+    return MODES_RECHERCHE.get(str(cle or RECHERCHE_DEFAUT),
+                               MODES_RECHERCHE[RECHERCHE_DEFAUT])
+
+
+def libelles_recherche() -> list[str]:
+    """Libellés des modes, dans l'ordre croissant de durée."""
+    return [MODES_RECHERCHE[cle]["libelle"]
+            for cle in (RECHERCHE_RAPIDE, RECHERCHE_APPROFONDIE,
+                        RECHERCHE_EXHAUSTIVE)]
+
+
+def recherche_par_libelle(libelle: str) -> str:
+    """Clé du mode correspondant à un libellé affiché."""
+    for cle, mode in MODES_RECHERCHE.items():
+        if mode["libelle"] == libelle:
+            return cle
+    return RECHERCHE_DEFAUT
+
+
+# ===========================================================================
+# FILTRAGE DES FEATURES PAR UTILITÉ MESURÉE
+# ===========================================================================
+# À la fin de chaque entraînement, l'utilité de chaque feature est mesurée par
+# permutation : on mélange sa colonne au hasard et on regarde de combien l'AUC
+# tombe. Une feature dont l'AUC ne bouge pas ne sert à rien ; une feature dont
+# l'AUC MONTE quand on la détruit nuit activement.
+#
+# Le seuil ci-dessous permet de réentraîner en ne gardant que les features
+# au-dessus d'une utilité donnée. Il s'exprime directement en PERTE D'AUC, la
+# même unité que le graphique d'importance. L'ordre de grandeur réel sur ces
+# données : la meilleure feature fait perdre 0.010 à 0.015 d'AUC, la médiane
+# 0.0005, et la moitié du classement tourne autour de zéro. D'où une borne de
+# curseur à 0.003, au-delà de laquelle il ne resterait presque rien.
+#
+# Point de méthode important : l'utilité qui sert à FILTRER est mesurée sur le
+# bloc de validation, jamais sur le test. Choisir ses features d'après le test
+# puis annoncer une performance sur ce même test, c'est se noter soi-même —
+# le chiffre obtenu serait flatteur et faux. Le graphique de la page
+# Visualisation, lui, reste mesuré sur le test : il sert à diagnostiquer, pas
+# à décider.
+SEUIL_UTILITE_MAX = 0.003      # perte d'AUC, borne haute du curseur
+SEUIL_UTILITE_PAS = 60         # nombre de crans du curseur
+FEATURES_MINIMUM = 3           # jamais moins, quel que soit le seuil
+
+# Répétitions de la permutation pendant l'entraînement. Cinq suffisent pour
+# classer ; en demander plus rallongerait l'entraînement sans changer l'ordre.
+REPETITIONS_UTILITE = 5
+
+

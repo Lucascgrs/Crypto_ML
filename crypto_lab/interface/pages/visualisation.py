@@ -129,24 +129,41 @@ class PageVisualisation:
             theme.styliser_axes(axe)
 
             valeurs = importance.sort_values()
-            # Les colonnes de contexte (multi-timeframe, exogènes) sont teintées
-            # à part : c'est le seul graphique qui dise si elles servent
-            # vraiment à quelque chose ou si elles ne font que diluer le signal.
-            couleurs = [COULEURS["bleu"] if self._est_contexte(nom)
-                        else (COULEURS["vert"] if valeur > 0 else COULEURS["rouge"])
-                        for nom, valeur in valeurs.items()]
-            axe.barh(list(valeurs.index), valeurs.values, color=couleurs)
+
+            # Deux informations à porter en même temps, donc deux canaux :
+            #   REMPLISSAGE = le signe. Vert, la feature sert ; rouge, la
+            #     mélanger AMÉLIORE le modèle — elle nuit activement.
+            #   CONTOUR = l'origine. Bleu pour le contexte (multi-timeframe,
+            #     exogènes, temps, régime), pour voir d'un coup d'œil si ces
+            #     colonnes servent vraiment ou si elles diluent le signal.
+            # Les teinter en bleu quel que soit leur signe, comme avant,
+            # masquait justement les colonnes de contexte nuisibles.
+            remplissage = [COULEURS["vert"] if valeur > 0 else COULEURS["rouge"]
+                           for valeur in valeurs.values]
+            contours = [COULEURS["bleu"] if self._est_contexte(nom) else "none"
+                        for nom in valeurs.index]
+            axe.barh(list(valeurs.index), valeurs.values, color=remplissage,
+                     edgecolor=contours, linewidth=1.6)
             axe.axvline(0, color="#777777", lw=0.8)
-            axe.set_title(f"{symbole} ({intervalle}) — perte d'AUC quand la feature "
-                          f"est mélangée (horizon {horizon})\n"
-                          f"en bleu : contexte multi-timeframe et données exogènes")
+            axe.set_title(
+                f"{symbole} ({intervalle}) — perte d'AUC quand la feature "
+                f"est mélangée (horizon {horizon}, bloc TEST)\n"
+                f"vert : la feature sert · rouge : elle nuit · "
+                f"contour bleu : contexte (multi-timeframe, exogène, temps, régime)")
             axe.set_xlabel("Perte d'AUC (plus c'est grand, plus la feature compte)")
             figure.tight_layout()
             self._afficher_figure("viz", figure)
 
             classement = " · ".join(f"{nom} {valeur:+.4f}"
                                     for nom, valeur in importance.items())
-            self.log(f"🏅 Importance : {classement}")
+            self.log(f"🏅 Importance (bloc test) : {classement}")
+            self.log("ℹ️  Ce classement est mesuré sur le TEST : il DIAGNOSTIQUE "
+                     "le modèle. Le curseur « utilité minimale » de la page "
+                     "Modèle, lui, s'appuie sur la mesure faite sur la "
+                     "validation — choisir ses features d'après le test puis "
+                     "annoncer un résultat sur ce même test reviendrait à se "
+                     "noter soi-même. Les deux classements peuvent différer, et "
+                     "l'écart renseigne sur la stabilité du modèle.")
 
         self.executer(
             f"Importance {symbole}",

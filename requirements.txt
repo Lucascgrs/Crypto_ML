@@ -1,7 +1,7 @@
 # --- Données ---------------------------------------------------------------
-pandas
+pandas            # >= 1.4 pour rolling(...).rank(), le rang glissant du panier
 numpy
-requests          # Binance spot + futures (funding, open interest), CoinGecko
+requests          # Binance spot + futures (funding, basis, open interest), CoinGecko
 yfinance          # source de repli quand une crypto n'est pas sur Binance
 openpyxl          # lecture / écriture des fichiers Excel
 pyarrow           # cache Parquet : recharge les analyses ~50x plus vite

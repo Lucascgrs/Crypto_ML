@@ -50,6 +50,7 @@ def _memoriser(chemin: str, mtime: float, df: pd.DataFrame) -> None:
 def vider_cache() -> None:
     """Vide le cache mémoire (utile après une réécriture massive de fichiers)."""
     _CACHE.clear()
+    _APERCUS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +137,65 @@ def chemin_meta_regression(symbole: str, intervalle: str, horizon: int,
 def _chemin_parquet(chemin_xlsx: str) -> str:
     return os.path.splitext(chemin_xlsx)[0] + ".parquet"
 
+
+
+# Aperçus déjà calculés, indexés par (chemin, date de modification).
+_APERCUS: dict[str, tuple[float, dict]] = {}
+
+
+def apercu_tableau(chemin: str) -> dict | None:
+    """
+    Nombre de lignes et bornes de dates d'un tableau, SANS le charger.
+
+    Écrit pour l'interface : décrire un panier de vingt-cinq cryptos avec
+    `lire_tableau` obligerait à charger vingt-cinq fichiers complets dans le
+    thread graphique, donc à figer la fenêtre plusieurs secondes. Ici on ne lit
+    que la colonne d'index du cache Parquet — quelques millisecondes par
+    fichier, et le résultat est mémorisé tant que le fichier ne change pas.
+
+    Retourne None si le fichier est absent ou illisible.
+    """
+    if not os.path.exists(chemin):
+        return None
+
+    mtime = os.path.getmtime(chemin)
+    memo = _APERCUS.get(chemin)
+    if memo is not None and memo[0] == mtime:
+        return memo[1]
+
+    # Le tableau est peut-être déjà en mémoire : inutile de toucher au disque.
+    en_cache = _CACHE.get(chemin)
+    df = en_cache[1] if en_cache is not None and en_cache[0] == mtime else None
+
+    if df is None:
+        parquet = _chemin_parquet(chemin)
+        if PARQUET_OK and os.path.exists(parquet) and os.path.getmtime(parquet) >= mtime:
+            try:
+                # `columns=[]` ne rapatrie que l'index : c'est tout ce qu'il faut.
+                df = pd.read_parquet(parquet, columns=[])
+            except Exception:                          # noqa: BLE001
+                df = None
+
+    if df is None:
+        # Pas de cache Parquet exploitable : on retombe sur la lecture normale,
+        # qui alimentera le cache pour les fois suivantes.
+        df = lire_tableau(chemin)
+    # Attention : `df.empty` serait vrai ici. La lecture « index seul » rend un
+    # tableau à zéro colonne, et pandas juge vide tout tableau dont un axe l'est.
+    if df is None or len(df) == 0:
+        return None
+
+    index = pd.to_datetime(df.index, errors="coerce")
+    index = index[index.notna()]
+    if not len(index):
+        return None
+
+    apercu = {"lignes": int(len(index)),
+              "debut": index.min(), "fin": index.max()}
+    _APERCUS[chemin] = (mtime, apercu)
+    while len(_APERCUS) > 128:
+        _APERCUS.pop(next(iter(_APERCUS)))
+    return apercu
 
 # ---------------------------------------------------------------------------
 # Lecture / écriture des tableaux temporels
@@ -323,3 +383,44 @@ def separer_cle_modele(cle: str) -> tuple[str, str, int]:
     """Raccourci historique : (symbole, intervalle, horizon) seulement."""
     infos = analyser_cle(cle)
     return infos.symbole, infos.intervalle, infos.horizon
+
+
+def paniers_contenant(symbole: str, intervalle: str, horizon: int,
+                      tache: str | None = None) -> list[str]:
+    """
+    Modèles de panier entraînés qui incluent cette crypto.
+
+    Sert de repli : quand on demande l'importance des features ou une
+    prédiction pour BTC sans que BTC ait son propre modèle, un panier
+    « PANIER-BTC-ETH-SOL » fait parfaitement l'affaire — c'est même l'usage
+    prévu. Sans ce repli, l'interface renverrait « modèle introuvable » alors
+    qu'un modèle applicable existe juste à côté.
+    """
+    trouves = []
+    for cle in lister_modeles():
+        infos = analyser_cle(cle)
+        if (infos.intervalle != intervalle or infos.horizon != horizon
+                or infos.walk_forward):
+            continue
+        if tache is not None and infos.tache != tache:
+            continue
+        if symbole in config.symboles_panier(infos.symbole):
+            trouves.append(infos.symbole)
+    return sorted(set(trouves))
+
+
+def taches_entrainees(symbole: str, intervalle: str, horizon: int) -> list[str]:
+    """
+    Objectifs de classification réellement entraînés pour cette crypto et cet horizon.
+
+    Sert à ne pas envoyer l'utilisateur chercher un modèle « direction » quand
+    il vient d'entraîner « direction_nette » : le fichier sur le disque fait
+    foi, pas le réglage affiché.
+    """
+    trouvees = []
+    for cle in lister_modeles():
+        infos = analyser_cle(cle)
+        if (infos.symbole == symbole and infos.intervalle == intervalle
+                and infos.horizon == horizon and not infos.walk_forward):
+            trouvees.append(infos.tache)
+    return sorted(set(trouvees))

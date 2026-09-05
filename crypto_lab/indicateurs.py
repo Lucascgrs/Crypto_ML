@@ -212,6 +212,117 @@ def calculer_indicateurs(df: pd.DataFrame) -> pd.DataFrame:
     }, index=df.index)
 
 
+def calculer_flux(df: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Trois features d'ORDER FLOW, à partir des colonnes déjà téléchargées.
+
+    Le prix dit ce qui s'est passé, l'order flow dit qui l'a provoqué. Une
+    bougie verte produite par des acheteurs au marché n'annonce pas la même
+    suite qu'une bougie verte produite par des vendeurs qui se retirent : dans
+    le premier cas quelqu'un a PAYÉ pour entrer, dans le second personne ne
+    voulait vendre. Le chandelier est identique, l'information ne l'est pas.
+
+    C'est la seule famille de features du projet qui ne soit pas une
+    transformation du prix — les 8 indicateurs, leur version multi-timeframe et
+    les 24 variations viennent tous du même OHLCV.
+
+    Retourne None si le fichier brut date d'avant l'ajout de ces colonnes : il
+    suffit alors de relancer le téléchargement.
+    """
+    manquantes = [c for c in config.COLONNES_FLUX_BRUT if c not in df.columns]
+    if manquantes:
+        return None
+
+    volume = df["Volume"].astype(float)
+    trades = df["Trades"].astype(float)
+    taker = df["TakerBase"].astype(float)
+
+    # Part du volume partie à l'achat agressif, recentrée sur zéro : +1 = tout
+    # le volume à l'achat au marché, −1 = tout à la vente, 0 = équilibre.
+    desequilibre = 2 * taker / volume.replace(0, np.nan) - 1
+    desequilibre = desequilibre.clip(-1, 1)
+
+    # Taille moyenne d'un trade, rapportée à sa médiane récente. Le niveau brut
+    # est en unités de la crypto (donc incomparable d'un actif à l'autre et
+    # dérivant avec le prix) ; le log du rapport est stationnaire et centré.
+    taille = volume / trades.replace(0, np.nan)
+    reference = taille.rolling(config.FENETRE_TAILLE, min_periods=20).median()
+    taille_norm = np.log(taille / reference.replace(0, np.nan))
+
+    return pd.DataFrame({
+        "Flux_Desequilibre": desequilibre,
+        "Flux_Cumul": desequilibre.rolling(config.FENETRE_FLUX, min_periods=3).mean(),
+        "Taille_Trade_Norm": taille_norm,
+    }, index=df.index)
+
+
+def calculer_temps(index: pd.DatetimeIndex, intervalle: str) -> pd.DataFrame | None:
+    """
+    Saisonnalité horaire, hebdomadaire, et position dans le cycle de funding.
+
+    Le marché crypto ne dort jamais mais ne respire pas de façon uniforme : la
+    volatilité et les volumes suivent l'ouverture des séances, le week-end est
+    nettement moins liquide, et le funding tombe toutes les 8 heures, ce qui
+    déplace mécaniquement des positions juste avant l'échéance.
+
+    L'heure est codée en sinus/cosinus parce qu'elle est CIRCULAIRE : donnée
+    comme un entier de 0 à 23, elle apprendrait au modèle une frontière
+    imaginaire entre 23 h et minuit alors que ce sont deux heures voisines.
+
+    Retourne None pour les intervalles d'un jour ou plus : l'heure y est
+    constante, et une colonne constante n'apporte rien.
+    """
+    if config.heures(intervalle) >= 24:
+        return None
+
+    heure = index.hour + index.minute / 60.0
+    angle = 2 * np.pi * heure / 24.0
+    cycle = config.CYCLE_FUNDING_HEURES
+
+    return pd.DataFrame({
+        "Heure_Sin": np.sin(angle),
+        "Heure_Cos": np.cos(angle),
+        "Jour_Semaine": index.dayofweek.to_numpy(dtype=float),
+        # 0 juste après un versement, proche de 1 juste avant le suivant.
+        "Avant_Funding": (heure % cycle) / cycle,
+    }, index=index)
+
+
+def calculer_regime(df: pd.DataFrame, indicateurs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Deux colonnes qui situent la bougie dans son RÉGIME de marché.
+
+    Un ATR de 1.2 % n'a pas le même sens partout : c'est une tempête pour du
+    BTC et un jour ordinaire pour un altcoin récent. Le rang de percentile sur
+    les 500 dernières périodes répond à la seule question qui compte — « est-ce
+    agité PAR RAPPORT À D'HABITUDE, ici et maintenant ? » — et il est
+    directement comparable d'une crypto à l'autre, ce qui le rend indispensable
+    dès qu'on entraîne un modèle sur un panier.
+
+    C'est l'alternative économe aux « modèles par régime » : plutôt que de
+    couper les données en quatre au moment où elles manquent le plus, on donne
+    au modèle de quoi reconnaître le régime et on le laisse conditionner ses
+    règles dessus — ce que les arbres font naturellement.
+    """
+    close = df["Close"].astype(float)
+    atr_pct = indicateurs["ATR_Pct"].astype(float)
+
+    # Rang de percentile CAUSAL : la fenêtre ne contient que du passé.
+    volatilite = atr_pct.rolling(config.FENETRE_REGIME, min_periods=50).rank(pct=True)
+
+    # Écart à la tendance longue, mesuré en bougies moyennes plutôt qu'en
+    # pourcentage : 5 % au-dessus de la moyenne, c'est énorme en marché calme
+    # et anodin en marché agité.
+    moyenne = close.rolling(config.FENETRE_TENDANCE, min_periods=50).mean()
+    atr_absolu = (atr_pct * close).replace(0, np.nan)
+    tendance = (close - moyenne) / atr_absolu
+
+    return pd.DataFrame({
+        "Regime_Volatilite": volatilite,
+        "Regime_Tendance": tendance.clip(-20, 20),
+    }, index=df.index)
+
+
 def agreger(df: pd.DataFrame, regle: str) -> pd.DataFrame:
     """
     Rééchantillonne un OHLCV vers un intervalle plus large.
@@ -298,12 +409,18 @@ def _filtrer_contexte(contexte: pd.DataFrame) -> pd.DataFrame:
     """
     gardees = {}
     for nom in contexte.columns:
-        couverture = float(contexte[nom].notna().mean())
-        if couverture >= config.COUVERTURE_MINIMALE:
-            gardees[nom] = contexte[nom]
-        else:
+        serie = contexte[nom]
+        couverture = float(serie.notna().mean())
+        if couverture < config.COUVERTURE_MINIMALE:
             print(f"   ⏭️  {nom} ignorée — {couverture:.0%} de couverture "
                   f"(minimum {config.COUVERTURE_MINIMALE:.0%}).")
+            continue
+        # Une colonne constante n'apporte rien et fausse les mesures
+        # d'importance : c'est le cas de l'heure sur des bougies journalières.
+        if float(serie.dropna().nunique()) < 2:
+            print(f"   ⏭️  {nom} ignorée — valeur constante sur cet intervalle.")
+            continue
+        gardees[nom] = serie
     return pd.DataFrame(gardees, index=contexte.index)
 
 
@@ -330,8 +447,9 @@ def analyser(df_brut: pd.DataFrame, symbole: str | None = None,
     df.index = pd.to_datetime(df.index)
     df = df[~df.index.duplicated(keep="last")].sort_index()
 
-    for colonne in config.COLONNES_PRIX:
-        df[colonne] = pd.to_numeric(df[colonne], errors="coerce")
+    for colonne in config.COLONNES_BRUTES:
+        if colonne in df.columns:
+            df[colonne] = pd.to_numeric(df[colonne], errors="coerce")
 
     prix = df[config.COLONNES_PRIX]
     indicateurs = calculer_indicateurs(df)
@@ -340,7 +458,7 @@ def analyser(df_brut: pd.DataFrame, symbole: str | None = None,
     morceaux = [prix, indicateurs]
     colonnes_contexte: list[str] = []
     if contexte and intervalle:
-        supplements = _rassembler_contexte(df, symbole, intervalle)
+        supplements = _rassembler_contexte(df, indicateurs, symbole, intervalle)
         if supplements is not None and not supplements.empty:
             morceaux.append(supplements)
             colonnes_contexte = list(supplements.columns)
@@ -356,12 +474,15 @@ def analyser(df_brut: pd.DataFrame, symbole: str | None = None,
                                          if c in config.INDICATEURS_MTF]
     resultat = resultat.dropna(subset=obligatoires)
 
-    # Zéro est la valeur neutre des trois colonnes exogènes : funding nul
-    # (positionnement équilibré), cumul nul, open interest inchangé. C'est donc
-    # « aucune information » et non une valeur inventée.
-    exogenes = [c for c in colonnes_contexte if c in config.COLONNES_EXOGENES]
-    if exogenes:
-        resultat[exogenes] = resultat[exogenes].fillna(0.0)
+    # Toutes les colonnes de contexte autres que le multi-timeframe ont une
+    # valeur NEUTRE bien définie — funding nul, flux équilibré, taille de trade
+    # médiane, écart nul à la tendance. Les trous sont remplis par cette valeur
+    # plutôt que par une suppression de ligne : sacrifier six années
+    # d'historique parce qu'un contrat perpétuel n'existait pas encore serait
+    # un très mauvais échange.
+    for colonne in colonnes_contexte:
+        if colonne in config.COLONNES_NEUTRALISABLES:
+            resultat[colonne] = resultat[colonne].fillna(config.valeur_neutre(colonne))
 
     # Tout ce qui n'est pas un prix passe en float32 : la précision est
     # largement suffisante (7 chiffres significatifs) et le fichier pèse deux
@@ -374,9 +495,20 @@ def analyser(df_brut: pd.DataFrame, symbole: str | None = None,
     return resultat[config.colonnes_analyse(colonnes_contexte)]
 
 
-def _rassembler_contexte(df: pd.DataFrame, symbole: str | None,
+def _rassembler_contexte(df: pd.DataFrame, indicateurs: pd.DataFrame,
+                         symbole: str | None,
                          intervalle: str) -> pd.DataFrame | None:
-    """Assemble les colonnes multi-timeframe et exogènes réellement utilisables."""
+    """
+    Assemble les quatre familles de colonnes de contexte réellement utilisables.
+
+      multi-timeframe  les 8 indicateurs un cran au-dessus (4h pour du 1h) ;
+      order flow       qui achète, qui vend — déjà dans les chandeliers ;
+      temps            saisonnalité horaire et cycle de funding ;
+      régime           où l'on se situe dans le cycle de volatilité ;
+      exogènes         funding, open interest, basis perp/spot.
+
+    Chacune est indépendante : l'absence de l'une n'empêche pas les autres.
+    """
     from . import exogene  # import tardif : dépend du réseau, pas du calcul
 
     morceaux = []
@@ -384,9 +516,25 @@ def _rassembler_contexte(df: pd.DataFrame, symbole: str | None,
     if superieur is not None:
         morceaux.append(superieur)
 
+    flux = calculer_flux(df)
+    if flux is not None:
+        morceaux.append(flux)
+        print(f"🌊 Order flow : {len(flux.columns)} colonnes (déséquilibre "
+              f"acheteurs/vendeurs).")
+    else:
+        print("ℹ️  Order flow indisponible : relance le téléchargement pour "
+              "récupérer les colonnes Trades et TakerBase.")
+
+    temps = calculer_temps(df.index, intervalle)
+    if temps is not None:
+        morceaux.append(temps)
+
+    morceaux.append(calculer_regime(df, indicateurs))
+
     if symbole:
         try:
-            externe = exogene.contexte_exogene(symbole, intervalle, df.index)
+            externe = exogene.contexte_exogene(
+                symbole, intervalle, df.index, spot=df["Close"].astype(float))
         except Exception as err:                       # noqa: BLE001
             print(f"⚠️ Contexte exogène ignoré : {err}")
             externe = None

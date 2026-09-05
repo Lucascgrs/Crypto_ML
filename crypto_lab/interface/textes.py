@@ -25,13 +25,17 @@ AIDES = {
                "Plus l'historique est long, plus le modèle a de régimes de\n"
                "marché à apprendre (hausse, baisse, stagnation).",
 
-    "exogene": "Télécharge le funding rate et l'open interest depuis l'API\n"
-               "publique Binance Futures. C'est la seule information du projet\n"
-               "qui ne soit PAS dérivée du prix.\n\n"
-               "Le funding remonte au lancement du contrat (2019-2020) et sert\n"
-               "immédiatement. L'open interest, lui, n'est public que sur\n"
-               "30 jours : chaque téléchargement complète le précédent, la\n"
-               "couverture s'étend donc au fil des mises à jour.\n\n"
+    "exogene": "Télécharge le funding rate, le prix du contrat perpétuel et\n"
+               "l'open interest depuis l'API publique Binance Futures.\n"
+               "Avec l'order flow, c'est la seule information du projet qui ne\n"
+               "soit PAS dérivée du prix spot.\n\n"
+               "Le funding et le basis perp/spot remontent au lancement du\n"
+               "contrat (2019-2020) et servent immédiatement — une seule passe\n"
+               "suffit, il n'y a rien à accumuler.\n\n"
+               "L'open interest, lui, n'est public que sur 30 jours : chaque\n"
+               "téléchargement complète le précédent, la couverture s'étend\n"
+               "donc au fil des mises à jour. Tant qu'elle reste sous 60 %, la\n"
+               "colonne est automatiquement écartée.\n\n"
                "À relancer avant l'analyse pour que les colonnes soient prises\n"
                "en compte.",
 
@@ -40,15 +44,95 @@ AIDES = {
                "24 colonnes variation_x, puis enregistre le tout dans\n"
                "analysis_crypto/.\n"
                "À relancer après chaque nouveau téléchargement de données.",
-    "contexte": "Ajoute les 8 mêmes indicateurs calculés sur l'intervalle\n"
-                "supérieur (4h pour du 1h), plus le funding rate s'il a été\n"
-                "téléchargé.\n\n"
+    "contexte": "Ajoute cinq familles de colonnes autour des 8 indicateurs :\n\n"
+                "  • multi-timeframe — les 8 mêmes un cran au-dessus (4h\n"
+                "    pour du 1h), décalés pour interdire toute fuite ;\n"
+                "  • order flow — qui achète et qui vend à l'agressif, déjà\n"
+                "    présent dans les chandeliers téléchargés ;\n"
+                "  • temps — heure, jour de la semaine, cycle de funding ;\n"
+                "  • régime — où l'on se situe dans le cycle de volatilité ;\n"
+                "  • exogènes — funding, basis perp/spot, open interest.\n\n"
                 "Une colonne n'est retenue que si elle couvre au moins 60 %\n"
                 "des lignes : inutile de garder une colonne vide qui\n"
                 "obligerait à jeter des années d'historique.\n\n"
                 "Décoche pour revenir aux 8 indicateurs seuls et comparer.",
 
     # --- Page Modèle ---
+    "panier": "Entraîne UN modèle sur plusieurs cryptos empilées.\n\n"
+              "Pourquoi : sur une seule crypto en 1h, le modèle dispose\n"
+              "d'environ 50 000 lignes, dont le futur se chevauche. À\n"
+              "l'horizon 5, cela ne fait qu'une dizaine de milliers\n"
+              "d'observations vraiment indépendantes — très peu pour\n"
+              "distinguer un avantage de 2 points du simple bruit. Empiler\n"
+              "vingt cryptos multiplie la matière par vingt.\n\n"
+              "Ce qui est géré automatiquement :\n\n"
+              "  • Les blocs train / validation / test sont coupés aux MÊMES\n"
+              "    DATES pour toutes. Chaque crypto apprend sur tout son\n"
+              "    historique avant la frontière — 2015 pour l'une, 2018 pour\n"
+              "    l'autre — et toutes sont jugées sur la même période. Sans\n"
+              "    cela, le passé de l'une contiendrait le futur de l'autre.\n"
+              "  • Les features dont le NIVEAU dépend de l'actif (ATR, écart\n"
+              "    à la moyenne, funding…) sont converties en rang de\n"
+              "    percentile glissant, crypto par crypto. Un ATR de 0.5 %\n"
+              "    n'a pas le même sens sur BTC et sur un altcoin.\n"
+              "  • Seules les features présentes chez TOUTES sont gardées.\n\n"
+              "Le modèle est enregistré sous « PANIER-BTC-ETH-… » et\n"
+              "s'applique ensuite à n'importe laquelle des cryptos.",
+
+    "profondeur": "Combien de jeux d'hyperparamètres essayer avant de choisir.\n\n"
+                  "  Rapide (3)       les trois réglages de référence :\n"
+                  "                   prudent, équilibré, souple.\n"
+                  "  Approfondie (18) + quinze tirages aléatoires autour.\n"
+                  "  Exhaustive (40)  balayage large de l'espace.\n\n"
+                  "Chaque configuration est évaluée sur les 4 blocs de\n"
+                  "validation croisée purgée, et c'est toujours la plus SIMPLE\n"
+                  "des configurations statistiquement à égalité qui gagne.\n\n"
+                  "Ce qu'il ne faut pas en attendre : quatre fois plus de temps\n"
+                  "ne donne pas quatre fois plus de précision. Mesuré sur BTC\n"
+                  "1h à l'horizon 5 : rapide 34 s pour 51,82 % de justesse,\n"
+                  "approfondie 140 s pour 51,99 %. L'écart (0,17 point) est\n"
+                  "vingt fois plus petit que la marge d'erreur (±2,06 points).\n\n"
+                  "Le mode approfondi sert donc à VÉRIFIER que le réglage par\n"
+                  "défaut n'était pas mauvais, pas à espérer un gain. Les trois\n"
+                  "configurations de référence font toujours partie du lot :\n"
+                  "une recherche longue ne peut jamais faire pire.",
+
+    "utilite": "Ne garder que les features réellement utiles, et réentraîner.\n\n"
+               "Après chaque entraînement, chaque feature reçoit une note :\n"
+               "on mélange sa colonne au hasard et on regarde de combien\n"
+               "l'AUC tombe. Une feature à +0.0100 est essentielle ; une\n"
+               "feature à 0.0000 ne sert à rien ; une feature NÉGATIVE nuit\n"
+               "— le modèle s'appuyait dessus à tort.\n\n"
+               "Le curseur fixe le minimum exigé. Le nombre de features\n"
+               "conservées s'affiche juste en dessous, AVANT de lancer quoi\n"
+               "que ce soit. Repères sur BTC 1h : 0.0000 garde tout (29),\n"
+               "0.0005 en garde 9, 0.0020 en garde 3.\n\n"
+               "Deux garde-fous :\n\n"
+               "  • La note vient du bloc de VALIDATION, jamais du test.\n"
+               "    Choisir ses features d'après le test puis annoncer une\n"
+               "    performance sur ce même test, ce serait se noter soi-même.\n"
+               "  • Une feature écartée garde sa dernière note connue : baisser\n"
+               "    le curseur la fait revenir, rien n'est perdu.\n\n"
+               "Le curseur reste sans effet tant qu'aucun entraînement n'a eu\n"
+               "lieu : il faut bien une première mesure.",
+
+    "suivi": "Ouvre la fenêtre de suivi en direct de l'entraînement.\n\n"
+             "Elle montre trois choses :\n\n"
+             "  • la COURBE D'APPRENTISSAGE, arbre après arbre, sur\n"
+             "    l'apprentissage et sur la validation. Les deux descendent\n"
+             "    ensemble, puis celle de validation remonte pendant que\n"
+             "    l'autre continue : c'est le surapprentissage, en direct.\n"
+             "    Le trait vert marque où l'arrêt anticipé coupera ;\n"
+             "  • les CONFIGURATIONS évaluées, avec leur dispersion entre\n"
+             "    blocs. Quand toutes les barres d'erreur se recouvrent, le\n"
+             "    réglage ne change rien — et c'est une information ;\n"
+             "  • l'UTILITÉ des features, dès qu'elle est mesurée.\n\n"
+             "La fenêtre porte aussi le bouton d'arrêt. Rien n'est jamais tué\n"
+             "de force : le calcul consulte la demande d'arrêt à chaque arbre\n"
+             "et s'interrompt proprement, en une seconde ou deux.\n\n"
+             "La fermer n'arrête rien, et l'application reste utilisable\n"
+             "pendant tout l'entraînement.",
+
     "crypto_modele": "Fichier issu de l'étape Analyse. C'est sur ces données\n"
                      "que le modèle apprend, puis est évalué.",
     "type_modele": "Algorithme d'apprentissage. Ses forces et ses limites\n"
@@ -115,6 +199,27 @@ AIDES = {
                  "volatilité au même horizon.",
 
     # --- Page Backtest ---
+    "regimes": "Justesse ventilée par quartile de volatilité récente.\n\n"
+               "Une moyenne de 53 % peut recouvrir 58 % en marché calme et\n"
+               "48 % en marché agité. Dans ce cas le modèle n'est pas mauvais,\n"
+               "il est CONDITIONNEL : la bonne décision est de ne le suivre\n"
+               "que dans le régime où il fonctionne.\n\n"
+               "C'est la version économe des « modèles par régime » : on ne\n"
+               "coupe pas les données en quatre — ce qui les raréfierait au\n"
+               "moment où elles manquent déjà —, on coupe la LECTURE.",
+
+    "marge": "Marge d'erreur à 95 %, calculée sur la taille EFFECTIVE de\n"
+             "l'échantillon et non sur le nombre de lignes.\n\n"
+             "À l'horizon 5, la cible de la bougie de 10 h regarde jusqu'à\n"
+             "15 h et celle de 11 h jusqu'à 16 h : cinq lignes consécutives\n"
+             "décrivent le même morceau de futur et ne valent qu'UNE\n"
+             "observation. Dans un panier, deux cryptos à la même heure\n"
+             "bougent ensemble : même problème.\n\n"
+             "Conséquence : 1 200 signaux à l'horizon 5 ne pèsent que ~240\n"
+             "observations, et 55 % de justesse y reste compatible avec le\n"
+             "hasard. Sans cette correction, tous les chiffres du projet\n"
+             "paraîtraient deux à trois fois plus solides qu'ils ne le sont.",
+
     "bt_capital": "Capital de départ de la simulation.",
     "bt_seuil": "Confiance minimale pour ouvrir une position.",
     "bt_tp": "Take Profit : sortie dès ce gain (en %). 0 = désactivé.",
@@ -162,8 +267,10 @@ AIDES = {
 # de l'interface simplifiée : rien n'est caché, tout est expliqué ici.
 EXPLICATION_ENTRAINEMENT = """\
 L'écran ne demande que quatre choses — la crypto, le modèle, l'horizon et le
-seuil de confiance. Tout le reste est décidé automatiquement, selon les règles
-ci-dessous.
+seuil de confiance — plus deux réglages facultatifs dont le défaut convient :
+la profondeur de la recherche d'hyperparamètres (section 15) et l'utilité
+minimale exigée d'une feature (section 14). Tout le reste est décidé
+automatiquement, selon les règles ci-dessous.
 
 
 1 · CE QU'ON DEMANDE AU MODÈLE
@@ -357,11 +464,32 @@ ci-dessous.
      décalage, le modèle verrait dès 00:00 une information contenant les quatre
      heures suivantes — exactement ce qu'on lui demande de prédire.
 
-   • Exogènes — funding rate et open interest (Binance Futures). Tout le reste
-     du fichier est calculé à partir du même OHLCV : ce sont des
-     transformations d'une seule information. Le funding et l'open interest
-     viennent du positionnement réel des intervenants sur les dérivés. C'est le
-     seul apport d'information vraiment neuve disponible gratuitement.
+   • Order flow — Binance renvoie dans CHAQUE chandelier le nombre de trades
+     et le volume acheté à l'agressif. Ces colonnes étaient jetées ; elles sont
+     désormais conservées et transformées en trois features. Le prix dit ce qui
+     s'est passé, l'order flow dit QUI l'a provoqué : une bougie verte produite
+     par des acheteurs au marché n'annonce pas la même suite qu'une bougie
+     verte produite par des vendeurs qui se retirent. Chandelier identique,
+     information différente.
+
+   • Temps — heure du jour (en sinus/cosinus, parce que 23 h est voisine de
+     minuit), jour de la semaine, et position dans le cycle de funding de 8 h.
+     Le marché est ouvert en permanence mais ne respire pas uniformément : les
+     séances asiatique et américaine, le week-end peu liquide et les échéances
+     de funding sont des structures réelles et gratuites.
+
+   • Régime — rang de percentile de l'ATR sur 500 périodes, et écart à la
+     moyenne 200 mesuré en ATR. Un ATR de 1.2 % est une tempête pour du BTC et
+     un jour ordinaire pour un altcoin : seul le rang répond à « est-ce agité
+     par rapport à d'habitude, ici et maintenant ? ». C'est aussi ce qui rend
+     les cryptos comparables dans un panier.
+
+   • Exogènes — funding rate, basis perp/spot et open interest (Binance
+     Futures). Tout le reste du fichier est calculé à partir du même OHLCV : ce
+     sont des transformations d'une seule information. Ceux-là viennent du
+     positionnement réel des intervenants sur les dérivés. Le funding et le
+     basis ont un historique COMPLET dès le lancement du contrat et servent
+     immédiatement ; seul l'open interest doit être accumulé.
 
    Une colonne n'est retenue que si elle couvre au moins 60 % des lignes.
    L'open interest public de Binance ne remontant qu'à 30 jours, il est écarté
@@ -388,6 +516,239 @@ ci-dessous.
    L'importance par permutation (onglet Visualisation) reste le juge de paix :
    sur BTC 1h, Stoch_K écrase tout (+0.030) et les colonnes de contexte
    plafonnent à +0.0006. Elles aident, mais très marginalement.
+
+
+10 · LE PANIER : UN MODÈLE POUR PLUSIEURS CRYPTOS
+
+   Le vrai problème n'est peut-être pas le modèle, c'est la quantité de
+   données. Sur BTC en 1h, l'apprentissage porte sur ~50 000 lignes dont les
+   cibles se chevauchent : à l'horizon 5, cela ne fait qu'une dizaine de
+   milliers d'observations réellement indépendantes. Chercher là-dedans un
+   avantage de deux points, c'est chercher une aiguille dans un tas de bruit.
+
+   Le bouton « 🧺 Panier » entraîne UN modèle sur plusieurs cryptos empilées,
+   sans rien changer d'autre : mêmes features, même objectif, même code. Les
+   8 indicateurs ont d'ailleurs été conçus dès le départ pour être comparables
+   d'un actif à l'autre.
+
+   CE QUE ÇA DONNE, MESURÉ — et le résultat n'est pas celui qu'on espérait.
+   Quatre tailles de panier, BTC 1h, horizon 5 :
+
+     panier      lignes     AUC cv    taille effective du test
+     BTC seul    79 006     0.5479    2 370
+     2 cryptos   158 012    0.5512    2 370
+     7 cryptos   496 648    0.5514    2 129
+     11 cryptos  691 440    0.5477    2 074
+
+   Multiplier les lignes par 8,75 fait BAISSER la taille effective. Onze
+   cryptos à la même heure bougent ensemble : ce sont onze lignes, mais une
+   seule observation (voir section 11). Le panier ajoute du volume, pas de
+   l'information — et l'AUC croisée le confirme, identique à celle de BTC seul.
+
+   Il reste utile pour deux choses : une estimation plus stable quand une
+   crypto a peu d'historique, et surtout comme fondation d'une cible
+   CROSS-SECTIONNELLE — prédire l'écart d'une crypto à la médiane du panier
+   plutôt que son mouvement absolu. C'est exactement le mouvement commun,
+   imprévisible, qui sature ici le gain de données.
+
+   DEUX PIÈGES, ET COMMENT ILS SONT TRAITÉS.
+
+   • Des périodes différentes. Une crypto née en 2015 et une née en 2021 n'ont
+     pas le même historique. Si chacune était coupée à « 70 % de SES lignes »,
+     le test de l'une porterait sur 2024 et celui de l'autre sur 2019 : on
+     comparerait des marchés différents, et surtout l'entraînement de la
+     première contiendrait le test de la seconde — une fuite pure et simple.
+
+     Les frontières sont donc des DATES, communes à tout le panier. Chaque
+     crypto apprend sur tout ce dont elle dispose avant la bascule (2015→2025
+     pour l'une, 2018→2025 pour l'autre) et toutes sont validées puis testées
+     sur exactement la même période de marché.
+
+   • Des échelles différentes. Un ATR de 0.5 % est une tempête pour BTC et un
+     jour ordinaire pour un altcoin. Empilées telles quelles, ces colonnes
+     apprendraient au modèle à reconnaître la CRYPTO au lieu de la SITUATION.
+     Les features dont le niveau dépend de l'actif sont donc remplacées par
+     leur rang de percentile glissant, calculé crypto par crypto et uniquement
+     sur le passé. Les features déjà bornées (RSI, stochastique, ADX, %B,
+     déséquilibre de flux) gardent leur valeur : un RSI de 80 veut dire la même
+     chose partout.
+
+   Le modèle est enregistré sous « PANIER-BTC-ETH-… » et s'applique ensuite à
+   n'importe quelle crypto via le menu « Prédire avec le modèle de ».
+
+
+11 · LA TAILLE EFFECTIVE : POURQUOI LES CHIFFRES SONT MOINS SOLIDES QU'ILS N'EN
+     ONT L'AIR
+
+   C'est le correctif le plus inconfortable du projet, et le plus utile.
+
+   À l'horizon 5, la cible de la bougie de 10 h regarde jusqu'à 15 h, celle de
+   11 h jusqu'à 16 h : cinq lignes consécutives décrivent en grande partie le
+   MÊME morceau de futur. Elles ne valent pas cinq observations, elles en
+   valent une. Dans un panier, deux cryptos à la même heure bougent ensemble à
+   plus de 80 % : même problème.
+
+   La taille effective retenue est donc :
+
+        nombre d'horodatages DISTINCTS ÷ horizon
+
+   Toutes les marges d'erreur affichées en découlent. Concrètement, sur 11 851
+   bougies de test à l'horizon 5, cela fait 2 370 observations indépendantes —
+   et une justesse de 52.4 % s'écrit alors 52.4 % ± 2.0 %, pas 52.4 % tout
+   court. Sur 455 signaux très filtrés, la marge grimpe à ±10 points : le beau
+   60.9 % ne prouve plus rien du tout.
+
+   Ce n'est pas une coquetterie statistique. C'est exactement ce qui sépare un
+   avantage réel d'un mirage, et donc un backtest tenable d'une perte réelle.
+
+
+12 · LA VALIDATION CROISÉE PURGÉE
+
+   Auparavant, les trois configurations candidates étaient départagées sur un
+   seul bloc de validation. Or leurs AUC diffèrent de quelques millièmes quand
+   la marge d'erreur est de l'ordre du centième : c'était un tirage au sort
+   déguisé en optimisation.
+
+   La période d'apprentissage est maintenant découpée en blocs chronologiques
+   successifs. Chaque bloc est évalué par un modèle entraîné uniquement sur ce
+   qui le PRÉCÈDE — la seule validation croisée honnête sur une série
+   temporelle, un K-fold ordinaire ferait apprendre le futur. Les lignes dont
+   la cible empiète sur le bloc évalué sont retirées de l'apprentissage
+   (« purge »).
+
+   L'écart entre blocs est révélateur. Mesuré sur BTC 1h à l'horizon 5 :
+
+        0.5314 / 0.5642 / 0.5536 / 0.5422    →  0.5479 ± 0.0142
+
+   Soit cinq fois plus que l'écart entre les configurations elles-mêmes
+   (0.5479 / 0.5430 / 0.5382). La configuration retenue est celle qui tient sur
+   quatre époques de marché, pas celle qui a eu de la chance sur une seule.
+
+
+13 · LA JUSTESSE PAR RÉGIME
+
+   Une justesse moyenne de 53 % peut recouvrir 58 % en marché calme et 48 % en
+   marché agité. Le modèle n'est alors pas mauvais : il est CONDITIONNEL, et la
+   bonne décision n'est pas de le jeter mais de ne le suivre que dans le régime
+   où il fonctionne.
+
+   Le rapport d'évaluation ventile donc la justesse en quatre quartiles de
+   volatilité récente, chacun avec sa propre marge d'erreur. Quand l'écart
+   entre le meilleur et le pire régime dépasse la somme des deux marges, une
+   ligne le signale explicitement.
+
+   C'est la version économe des « modèles par régime » : entraîner quatre
+   modèles séparés diviserait les données par quatre au moment précis où elles
+   manquent le plus. On ne coupe pas les données, on coupe la LECTURE — et le
+   modèle reçoit de quoi reconnaître le régime lui-même (voir section 9).
+
+14 · L'UTILITÉ MESURÉE DES FEATURES, ET LE CURSEUR QUI EN DÉCOULE
+
+   À la fin de chaque entraînement, chaque feature reçoit une note : on mélange
+   sa colonne au hasard et on regarde de combien l'AUC tombe. Trois cas :
+
+        +0.0100   feature essentielle, le modèle s'écroule sans elle
+         0.0000   feature inutile, elle dilue sans détruire
+        -0.0010   feature NUISIBLE : la détruire AMÉLIORE le modèle
+
+   Le troisième cas n'est pas un bug. Il signifie que le modèle avait appris à
+   s'appuyer sur cette colonne pendant l'apprentissage, et que cet appui se
+   retourne contre lui ailleurs.
+
+   Le curseur « utilité minimale » de la page Modèle réentraîne en ne gardant
+   que les features au-dessus d'un seuil. Trois points de méthode :
+
+   • LA NOTE VIENT DE LA VALIDATION, JAMAIS DU TEST. C'est le point essentiel.
+     Choisir ses features d'après le test, puis annoncer une performance sur ce
+     même test, ce serait se noter soi-même : le chiffre obtenu serait flatteur
+     et faux. Le graphique de la page Visualisation reste, lui, mesuré sur le
+     test — il sert à diagnostiquer, pas à décider.
+
+   • Plus précisément, la mesure porte sur la seconde moitié de la validation,
+     celle qui n'a servi ni à l'apprentissage ni à l'arrêt anticipé. C'est le
+     bloc le plus propre disponible sans toucher au test.
+
+   • Une feature écartée conserve sa dernière note connue. Abaisser le curseur
+     la fait revenir au prochain entraînement : rien n'est perdu.
+
+   Ce qu'il faut en attendre, mesuré sur BTC 1h à l'horizon 5 : passer de 29 à
+   9 features change la justesse de 51,82 % à 52,66 %, pour une marge d'erreur
+   de ±2,05 points. Autrement dit, le filtre rend le modèle beaucoup plus
+   LISIBLE — on sait enfin sur quoi il s'appuie — sans qu'on puisse affirmer
+   qu'il le rend meilleur.
+
+
+15 · LA PROFONDEUR DE LA RECHERCHE D'HYPERPARAMÈTRES
+
+   Trois configurations écrites à la main, c'est un coin minuscule de l'espace
+   des réglages. Les modes « approfondie » (18) et « exhaustive » (40) y
+   ajoutent des tirages ALÉATOIRES — et non un balayage complet, qui ferait
+   1,7 million de combinaisons pour huit paramètres à six valeurs. Le tirage
+   aléatoire trouve un réglage équivalent en quelques dizaines d'essais, parce
+   que la performance ne dépend fortement que de deux ou trois paramètres et
+   que le tirage les explore tous à la fois.
+
+   Deux garde-fous :
+
+   • les trois configurations de référence font toujours partie du lot, donc
+     une recherche longue ne peut jamais faire PIRE qu'une recherche courte ;
+   • les candidates sont classées de la plus prudente à la plus souple, si bien
+     qu'à égalité statistique la règle du 1 écart-type garde la plus sobre.
+
+   Le résultat mesuré, sur BTC 1h à l'horizon 5 :
+
+        rapide (3 configs)        34 s    justesse 51,82 %   AUC test 0.5323
+        approfondie (18 configs) 140 s    justesse 51,99 %   AUC test 0.5342
+
+   Quatre fois plus de temps pour 0,17 point de justesse — vingt fois moins que
+   la marge d'erreur (±2,06 points). Ce réglage sert à VÉRIFIER que le défaut
+   n'était pas mauvais, pas à espérer un gain. Si l'entraînement paraît court,
+   ce n'est pas qu'il bâcle : c'est que le boosting sur 75 000 lignes et
+   29 colonnes est un problème petit pour une machine moderne, et que le
+   facteur limitant est la quantité d'information dans les données, pas la
+   puissance de calcul.
+
+
+16 · LE SUIVI EN DIRECT, ET LE FAIT QUE RIEN NE BLOQUE
+
+   Tout traitement long tourne dans un thread de travail : l'application reste
+   utilisable pendant un entraînement, on peut changer de page, lire la console
+   ou consulter un graphique. Le bouton « ⏹ Arrêter » de la barre de statut
+   interrompt proprement — le thread n'est jamais tué de force, il consulte une
+   demande d'arrêt entre chaque étape ET à chaque arbre construit, puis s'arrête
+   de lui-même en une seconde ou deux.
+
+   La fenêtre « 📺 Suivi en direct » montre trois choses :
+
+   • LA COURBE D'APPRENTISSAGE, arbre après arbre, sur l'apprentissage et sur
+     la validation. Les deux descendent ensemble, puis celle de validation
+     remonte pendant que l'autre continue de descendre : c'est exactement le
+     surapprentissage, et le trait vert marque où l'arrêt anticipé coupe.
+
+   • LES CONFIGURATIONS ÉVALUÉES, chacune avec sa dispersion entre blocs de
+     validation croisée. Quand toutes les barres d'erreur se recouvrent, le
+     réglage ne change rien — et c'est une information, pas une déception.
+
+   • L'UTILITÉ DES FEATURES, dès qu'elle est mesurée (section 14).
+
+   L'affichage est découplé du calcul, sur trois niveaux :
+
+   • le graphique n'est redessiné que si quelque chose a changé, et jamais plus
+     vite que sa cadence nominale ;
+   • on ne redessine que CE QUI a changé : les courbes sont repeintes par-dessus
+     un fond mémorisé, et les axes, graduations, grille et légende ne sont
+     recalculés qu'au changement d'ajustement ou quand les données sortent du
+     cadre. 11,7 ms par image au lieu de 250 ;
+   • la cadence S'ADAPTE : la boucle mesure ce que son dernier rendu a coûté et
+     s'espace d'autant, pour ne jamais prendre plus d'un cinquième du thread
+     graphique. Le graphique ralentit au lieu de bégayer, et il ne vole jamais
+     de temps au reste de l'interface.
+
+   Sans le deuxième point, mesuré : un entraînement pouvait bloquer l'interface
+   29 secondes d'affilée, le thread graphique passant tout son temps à
+   redessiner. Avec, la pire latence tombe sous les 100 ms.
+
+   Tant que la fenêtre est masquée, plus rien n'est tracé du tout.
 """
 
 

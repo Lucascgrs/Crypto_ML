@@ -5,6 +5,7 @@ Amplitude et espérance de gain, en ligne de commande.
     python Amplitude.py BTC_1h --horizon 3 --esperance   # + le score de décision
     python Amplitude.py BTC_1h --cible volatilite        # une seule des deux
     python Amplitude.py BTC_1h --esperance-seulement     # réutilise l'existant
+    python Amplitude.py BTC_1h --esperance --objectif direction_nette
 
 Le modèle de direction répond à « ça monte ou ça descend ? ». Il ne dit rien de
 l'AMPLEUR du mouvement — or un signal juste à 55 % sur un mouvement de 3 % ne
@@ -20,7 +21,7 @@ Le code est dans `crypto_lab/amplitude.py`. Depuis l'interface : onglet
 import argparse
 import sys
 
-from crypto_lab import amplitude, config, stockage
+from crypto_lab import amplitude, cibles, config, stockage
 
 
 def analyser_arguments():
@@ -42,6 +43,11 @@ def analyser_arguments():
     parseur.add_argument("--seuil", type=float, default=config.SEUIL_DEFAUT,
                          help=f"Seuil de confiance du modèle de direction "
                               f"(défaut : {config.SEUIL_DEFAUT}).")
+    parseur.add_argument("--objectif", default=None,
+                         choices=list(cibles.TACHES),
+                         help="Objectif du modèle de direction à combiner à "
+                              "l'amplitude. Par défaut : le seul entraîné à cet "
+                              "horizon, s'il n'y en a qu'un.")
     parseur.add_argument("--esperance", action="store_true",
                          help="Calculer aussi l'espérance de gain après entraînement.")
     parseur.add_argument("--esperance-seulement", action="store_true",
@@ -62,7 +68,8 @@ def main():
                                 arguments.modele, cible)
 
     if arguments.esperance or arguments.esperance_seulement:
-        amplitude.esperance(symbole, intervalle, arguments.horizon, arguments.seuil)
+        amplitude.esperance(symbole, intervalle, arguments.horizon, arguments.seuil,
+                            tache=arguments.objectif)
     return 0
 
 

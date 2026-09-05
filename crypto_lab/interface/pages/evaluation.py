@@ -19,7 +19,7 @@ import os
 import customtkinter as ctk
 
 from ... import cibles, stockage
-from ..textes import STATS, commenter
+from ..textes import AIDES, STATS, commenter
 from ..theme import COULEURS
 
 # Préfixes du menu déroulant : ils disent d'un coup d'œil quel type de modèle
@@ -117,6 +117,7 @@ class PageEvaluation:
         else:
             self._bloc_classification(meta)
         self._bloc_configuration(meta)
+        self._bloc_utilite(meta)
 
         self.log(f"📋 Évaluation affichée : {meta.get('symbole')} "
                  f"({meta.get('intervalle')}, horizon {meta.get('horizon')}).")
@@ -126,12 +127,20 @@ class PageEvaluation:
         objectif = cibles.obtenir(meta.get("tache"))
         rapport = metriques.get("rapport", {})
         self._bloc_performance(meta, metriques, objectif, rapport)
+        self._bloc_regimes(metriques)
         self._bloc_seuils(metriques, objectif)
 
     # -- blocs --------------------------------------------------------------
     def _bloc_identite(self, meta):
         section = self._section(self.eval_contenu, "🪪  Identité")
-        self._ligne_stat(section, "Crypto", meta.get("symbole", "?"))
+        membres = meta.get("panier") or []
+        if membres:
+            self._ligne_stat(
+                section, "Panier", f"{len(membres)} cryptos",
+                AIDES["panier"],
+                commentaire=", ".join(membres), niveau="bon")
+        else:
+            self._ligne_stat(section, "Crypto", meta.get("symbole", "?"))
         self._ligne_stat(section, "Intervalle", meta.get("intervalle", "?"))
         self._ligne_stat(section, "Modèle", meta.get("modele", "?"))
         if meta.get("cible"):
@@ -156,8 +165,46 @@ class PageEvaluation:
         section = self._section(self.eval_contenu,
                                 "🎯  Performance sur le test (données jamais vues)")
         self._stat(section, "accuracy", metriques.get("accuracy"), pourcentage=True)
+
+        # La marge d'erreur est LE chiffre qui décide si le reste veut dire
+        # quelque chose : une justesse de 55 % sur 240 observations
+        # indépendantes est encore compatible avec le hasard.
+        marge = metriques.get("marge_accuracy")
+        effectif = metriques.get("n_effectif")
+        if marge is not None and effectif:
+            significatif = metriques.get("significatif")
+            self._ligne_stat(
+                section, "Marge d'erreur à 95 %",
+                f"+/- {marge * 100:.2f} points", AIDES["marge"],
+                commentaire=(
+                    f"Calculée sur {effectif:,.0f} observations INDÉPENDANTES "
+                    f"pour {meta.get('n_test', 0):,} lignes de test — les cibles "
+                    f"se chevauchent sur l'horizon."
+                    + ("  L'écart à la réponse constante dépasse cette marge : "
+                       "le modèle a appris quelque chose."
+                       if significatif else
+                       "  L'écart à la réponse constante tient DANS cette marge : "
+                       "rien ne prouve encore un avantage réel.")),
+                niveau="bon" if significatif else "moyen")
+
         self._stat(section, "auc", metriques.get("auc"))
         self._stat(section, "auc_validation", meta.get("auc_validation"))
+
+        blocs = meta.get("auc_blocs") or []
+        if blocs:
+            ecart = (max(blocs) - min(blocs))
+            self._ligne_stat(
+                section, "AUC par bloc de validation croisée",
+                " · ".join(f"{a:.4f}" for a in blocs),
+                "Le modèle retenu est celui qui tient sur PLUSIEURS époques de\n"
+                "marché, pas celui qui a eu de la chance sur une seule.\n\n"
+                "L'écart entre blocs est la vraie mesure de l'incertitude : il\n"
+                "est presque toujours bien plus grand que l'écart entre les\n"
+                "configurations candidates, ce qui montre qu'un choix fait sur\n"
+                "un seul bloc revient à tirer au sort.",
+                commentaire=(f"Écart entre le meilleur et le pire bloc : "
+                             f"{ecart:.4f}."),
+                niveau="bon" if ecart < 0.03 else "moyen")
 
         # Le verdict qui compte : bat-on la réponse constante ?
         accuracy = metriques.get("accuracy")
@@ -188,6 +235,45 @@ class PageEvaluation:
             return
 
         self._detail_classes(section, metriques, objectif, rapport)
+
+    def _bloc_regimes(self, metriques):
+        """
+        Justesse ventilée par régime de volatilité.
+
+        La moyenne globale peut cacher un modèle parfaitement utilisable dans
+        un seul régime. C'est le tableau qui dit s'il faut trader tout le temps
+        ou seulement une partie du temps.
+        """
+        regimes = metriques.get("regimes") or []
+        if not regimes:
+            return
+
+        section = self._section(self.eval_contenu,
+                                "🌡️  Justesse par régime de volatilité",
+                                aide=AIDES["regimes"])
+        reference = metriques.get("accuracy") or 0.0
+        for ligne in regimes:
+            ecart = ligne["justesse"] - reference
+            self._ligne_stat(
+                section, f"{ligne['regime']}  ({ligne['n']:,} bougies)",
+                f"{ligne['justesse'] * 100:.2f} %  +/- {ligne['marge'] * 100:.2f}",
+                commentaire=(f"{ecart * 100:+.2f} points par rapport à la "
+                             f"moyenne du test."),
+                niveau=("bon" if ecart > ligne["marge"] else
+                        "mauvais" if ecart < -ligne["marge"] else "moyen"))
+
+        meilleur = max(regimes, key=lambda ligne: ligne["justesse"])
+        pire = min(regimes, key=lambda ligne: ligne["justesse"])
+        if meilleur["justesse"] - pire["justesse"] > meilleur["marge"] + pire["marge"]:
+            self._ligne_stat(
+                section, "Lecture", "Modèle conditionnel",
+                commentaire=(
+                    f"L'écart entre « {meilleur['regime']} » "
+                    f"({meilleur['justesse'] * 100:.1f} %) et « {pire['regime']} » "
+                    f"({pire['justesse'] * 100:.1f} %) dépasse les marges d'erreur : "
+                    f"ne suivre ce modèle qu'en régime « {meilleur['regime']} » "
+                    f"vaut mieux que de le suivre partout."),
+                niveau="bon")
 
     def _detail_classes(self, section, metriques, objectif, rapport):
         """
@@ -415,6 +501,26 @@ class PageEvaluation:
             self._stat(section, "n_arbres", arbres)
 
         self._stat(section, "embargo", meta.get("embargo"))
+        if meta.get("validation_croisee") is not None:
+            self._ligne_stat(
+                section, "Sélection de la configuration",
+                ("Validation croisée purgée" if meta["validation_croisee"]
+                 else "Bloc de validation unique"),
+                "Découper la période d'apprentissage en blocs successifs donne\n"
+                "plusieurs mesures au lieu d'une seule, donc un écart-type réel.\n"
+                "« Purgée » : les lignes dont la cible empiète sur le bloc évalué\n"
+                "sont retirées de l'apprentissage.",
+                commentaire=(f"Marge de sélection : "
+                             f"{meta.get('marge_selection'):.4f}."
+                             if meta.get("marge_selection") else ""),
+                niveau="bon" if meta.get("validation_croisee") else "moyen")
+        if meta.get("normalisation"):
+            self._ligne_stat(
+                section, "Normalisation entre cryptos", meta["normalisation"],
+                "Les features dont le niveau dépend de l'actif sont converties\n"
+                "en rang de percentile glissant, calculé crypto par crypto et\n"
+                "uniquement sur le passé.",
+                niveau="bon")
         if meta.get("calibration"):
             self._ligne_stat(section, "Calibration des probabilités",
                              meta["calibration"])
@@ -438,6 +544,21 @@ class PageEvaluation:
                 "dans le fichier analysé et couvrent au moins 60 % des lignes.",
                 commentaire=", ".join(contexte), niveau="moyen")
 
+        if meta.get("n_configurations"):
+            duree = meta.get("duree_secondes")
+            self._ligne_stat(
+                section, "Configurations essayées",
+                f"{meta['n_configurations']}",
+                "Nombre de jeux d'hyperparamètres comparés avant de choisir.\n"
+                "Chacun est évalué sur tous les blocs de validation croisée,\n"
+                "et c'est la plus SIMPLE des configurations statistiquement à\n"
+                "égalité qui est retenue.\n\n"
+                "En essayer six fois plus déplace le résultat de quelques\n"
+                "millièmes d'AUC, soit bien moins que sa marge d'erreur : ce\n"
+                "réglage sert à vérifier, pas à espérer un gain.",
+                commentaire=(f"{meta.get('mode_recherche_libelle', '')}"
+                             + (f" · {duree:,.0f} s au total" if duree else "")))
+
         hyperparametres = meta.get("hyperparametres", {})
         if hyperparametres:
             self._ligne_stat(
@@ -450,6 +571,86 @@ class PageEvaluation:
                 section, "Ressources exploitées",
                 f"{machine.get('coeurs', '?')} cœurs · budget "
                 f"{machine.get('budget_go', '?')} Go · max_bin {machine.get('max_bin', '?')}")
+
+    # ----------------------------------------------------------------------
+    def _bloc_utilite(self, meta):
+        """
+        Ce que chaque feature a réellement apporté, et ce qu'un filtre ferait.
+
+        C'est la contrepartie du curseur « utilité minimale » de la page
+        Modèle : le curseur décide, ce tableau montre sur quoi.
+
+        Mesure faite sur la VALIDATION, jamais sur le test. Le graphique de la
+        page Visualisation, lui, est mesuré sur le test — les deux ne sont pas
+        redondants : l'un sert à choisir, l'autre à diagnostiquer, et l'écart
+        entre les deux est en soi une information sur la stabilité du modèle.
+        """
+        utilite = meta.get("utilite") or {}
+        valeurs = utilite.get("valeurs") or {}
+        if not valeurs:
+            return
+
+        section = self._section(self.eval_contenu, "🏅  Utilité mesurée des features")
+
+        classement = sorted(valeurs.items(), key=lambda paire: paire[1],
+                            reverse=True)
+        utiles = [nom for nom, valeur in classement if valeur > 0]
+        nuisibles = [nom for nom, valeur in classement if valeur < 0]
+        actives = set(meta.get("features", []))
+
+        self._ligne_stat(
+            section, "Mesure",
+            f"{len(classement)} features · {utilite.get('n', 0):,} bougies "
+            f"de validation",
+            "On mélange chaque colonne au hasard et on regarde de combien\n"
+            "l'AUC tombe. Grande perte = feature essentielle. Perte nulle =\n"
+            "feature inutile. Perte NÉGATIVE = feature nuisible : le modèle\n"
+            "s'appuyait dessus et cet appui se retourne contre lui.\n\n"
+            "Bloc de validation, jamais le test : sélectionner ses features\n"
+            "d'après le test puis annoncer un résultat sur ce même test\n"
+            "reviendrait à se noter soi-même.",
+            commentaire=f"{utilite.get('repetitions', 5)} permutations par feature")
+
+        tete = classement[:8]
+        for nom, valeur in tete:
+            marque = "" if nom in actives else "  (écartée par le filtre)"
+            niveau = ("bon" if valeur >= 0.002 else
+                      "moyen" if valeur >= 0.0005 else
+                      "faible" if valeur > 0 else "mauvais")
+            self._ligne_stat(section, nom + marque, f"{valeur:+.4f}",
+                             niveau=niveau)
+
+        if len(classement) > len(tete):
+            reste = classement[len(tete):]
+            self._ligne_stat(
+                section, f"… et {len(reste)} autres",
+                f"de {reste[0][1]:+.4f} à {reste[-1][1]:+.4f}",
+                "Le bas du classement. Une feature autour de zéro ne coûte\n"
+                "presque rien à garder, mais elle n'apporte rien non plus.",
+                commentaire=", ".join(nom for nom, _ in reste))
+
+        self._ligne_stat(
+            section, "Bilan",
+            f"{len(utiles)} utiles · {len(classement) - len(utiles) - len(nuisibles)} "
+            f"neutres · {len(nuisibles)} nuisibles",
+            "Un modèle dont la moitié des features est neutre n'est pas\n"
+            "cassé : ces colonnes diluent le signal sans le détruire. Les\n"
+            "écarter avec le curseur « utilité minimale » de la page Modèle\n"
+            "rend le modèle plus lisible, rarement plus précis.",
+            commentaire=(f"Nuisibles : {', '.join(nuisibles)}"
+                         if nuisibles else ""),
+            niveau="moyen" if nuisibles else "bon")
+
+        if meta.get("features_ecartees"):
+            self._ligne_stat(
+                section, "Filtre appliqué à cet entraînement",
+                f"utilité ≥ {meta.get('seuil_utilite', 0):.4f} d'AUC",
+                "Les features écartées gardent leur dernière valeur mesurée :\n"
+                "abaisser le curseur les fait revenir au prochain entraînement.",
+                commentaire=(f"{len(meta['features_ecartees'])} écartées sur "
+                             f"{len(meta.get('features_candidates', []))} : "
+                             + ", ".join(meta["features_ecartees"])),
+                niveau="moyen")
 
     # -- utilitaire ---------------------------------------------------------
     def _stat(self, parent, cle, valeur, pourcentage=False):
